@@ -195,6 +195,37 @@ clang-format for C/C++.
 - New languages should flow through the language registry instead of adding
   isolated dispatch maps.
 
+## Planning With CodeNib Context
+
+External planning agents (ChatGPT, Codex, or any coding agent drafting a
+roadmap for this repository) must research with CodeNib itself before writing
+the plan, so proposals reuse the existing seams instead of inventing parallel
+systems:
+
+- Build or reuse the checkout's own index first (`codenib codegraph init`,
+  `codenib codegraph status`), then answer structural questions with the live
+  graph: `search_bm25` / `search_semantic` for discovery, `dependency_subgraph`
+  for callers/callees, `search_regex` for path-scoped checks. Use the CLI or
+  the MCP server (`codenib mcp <repo> --tool-surface full`); do not reason
+  about this codebase from memory.
+- Ground every load-bearing claim (node/edge types, schema version, function
+  behavior, layer semantics) in a `file:line` verified at the current HEAD.
+  If the plan corrects its source draft, keep an explicit verdict table that
+  names each rejected claim with its evidence.
+- Treat these as binding constraints on any proposal: the Storage Scope Guard
+  above, the `_SCHEMA_VERSION` + C++ decoder parity rule under Critical Code
+  Conventions, and the marker tiers under Testing Guidance. A plan that
+  requires a schema bump, a new registry, or a new package must say so
+  plainly and name the migration cost.
+- Reuse before inventing: the language registry (`codenib/languages.py`), the
+  centralized `codenib/types.py` constants and predicates, the candidate
+  filters in `codenib/ops/filter.py`, and the skill executor pattern under
+  `codenib/agent/skills/`. New edge types, vertex types, registries, or query
+  layers need a named consumer in the same program.
+- Keep plans under `docs/superpowers/plans/` with pseudocode against the real
+  APIs, a must-have edge-case list, and per-tier tests. Ambiguous inputs must
+  resolve to explicit diagnostics or `unresolved`, never to a guessed edge.
+
 ## Directory-Specific Rules
 
 Codex does not automatically load `.claude/CLAUDE.md`, but those files remain
