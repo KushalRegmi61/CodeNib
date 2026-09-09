@@ -30,6 +30,33 @@ from codenib.codegraph_hooks import (
 )
 
 
+def test_hook_parsers_wire_subcommands() -> None:
+    from codenib import cli
+
+    install = cli.build_parser().parse_args(
+        [
+            "codegraph",
+            "hook",
+            "install",
+            ".",
+            "--mode",
+            "background",
+            "--embedding-batch-size",
+            "2",
+        ]
+    )
+    assert install.codegraph_command == "hook"
+    assert install.hook_command == "install"
+    assert install.mode == "background"
+    assert install.embedding_batch_size == 2
+
+    status = cli.build_parser().parse_args(
+        ["codegraph", "hook", "status", ".", "--json"]
+    )
+    assert status.hook_command == "status"
+    assert status.json is True
+
+
 def test_render_hook_script_contains_marker_and_command() -> None:
     script = render_hook_script(
         ("codenib", "index", "/repo", "--preset", "auto"),

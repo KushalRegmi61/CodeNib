@@ -2773,6 +2773,143 @@ def _run_codegraph_uninstall(args: argparse.Namespace) -> int:
         raise _codegraph_error(exc) from exc
 
 
+def _run_codegraph_hook_install(args: argparse.Namespace) -> int:
+    from .codegraph_hooks import (
+        CodeGraphHookError,
+        hook_file_path,
+        install_hooks,
+        resolve_hook_mode,
+    )
+    from .codegraph_onboarding import (
+        CodeGraphOnboardingError,
+        resolve_codenib_command,
+    )
+
+    repo_path = resolve_repo_path(args.repo)
+    batch_size = _optional_int(
+        getattr(args, "embedding_batch_size", None)
+        or os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE"),
+        source="--embedding-batch-size",
+    )
+    try:
+        command, prefix = resolve_codenib_command()
+        receipt = install_hooks(
+            repo_path,
+            mode=resolve_hook_mode(args.mode),
+            batch_size=batch_size,
+            codenib_argv=(command, *prefix),
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+    except (CodeGraphHookError, CodeGraphOnboardingError, OSError) as exc:
+        raise _codegraph_error(exc) from exc
+    if args.dry_run:
+        for name in receipt.hooks:
+            print(f"would install {hook_file_path(repo_path, name)}")
+        print("Dry run complete; no hook files or receipts changed.")
+        return 0
+    for name in receipt.hooks:
+        print(f"{name}: installed (mode {receipt.mode})")
+    return 0
+
+
+def _run_codegraph_hook_status(args: argparse.Namespace) -> int:
+    from .codegraph_hooks import (
+        CodeGraphHookError,
+        inspect_hooks,
+        load_hook_receipt,
+    )
+    from .paths import repo_state_dir
+
+    repo_path = resolve_repo_path(args.repo)
+    try:
+        receipt = load_hook_receipt(repo_path)
+        inspections = inspect_hooks(repo_path, receipt)
+    except (CodeGraphHookError, OSError) as exc:
+        raise _codegraph_error(exc) from exc
+    ready = (
+        receipt is not None
+        and bool(inspections)
+        and all(item.installed and item.current for item in inspections)
+    )
+    if args.json:
+        report = {
+            "repository": str(repo_path),
+            "hooks": {
+                item.name: {
+                    "installed": item.installed,
+                    "current": item.current,
+                    "detail": item.detail,
+                }
+                for item in inspections
+            },
+            "ready": ready,
+        }
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if ready else 1
+    print(f"CodeGraph hooks: {'READY' if ready else 'NOT READY'}")
+    print(f"Repository: {repo_path}")
+    if receipt is None:
+        print("Receipt:    no CodeNib-managed hook receipt was found")
+    else:
+        print(f"Receipt mode: {receipt.mode}")
+    for item in inspections:
+        marker = "OK" if item.installed and item.current else "MISSING"
+        print(f"  [{marker:<7}] {item.name}: {item.detail}")
+    log_path = repo_state_dir(repo_path) / "hook.log"
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, NotADirectoryError):
+        lines = []
+    except OSError as exc:
+        raise _codegraph_error(exc) from exc
+    if lines:
+        print("Hook log (last 5 lines):")
+        for line in lines[-5:]:
+            print(f"  {line}")
+    return 0 if ready else 1
+
+
+def _run_codegraph_hook_uninstall(args: argparse.Namespace) -> int:
+    from .codegraph_hooks import (
+        HOOK_MARKER,
+        HOOK_NAMES,
+        CodeGraphHookError,
+        hook_file_path,
+        remove_hooks,
+    )
+
+    repo_path = resolve_repo_path(args.repo)
+    try:
+        if args.dry_run:
+            for name in HOOK_NAMES:
+                path = hook_file_path(repo_path, name)
+                if not path.exists() and not path.is_symlink():
+                    continue
+                try:
+                    observed = path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise CodeGraphHookError(
+                        f"cannot read git hook {path}: {exc}"
+                    ) from exc
+                if HOOK_MARKER not in observed and not args.force:
+                    raise CodeGraphHookError(
+                        f"refusing to remove foreign git hook {path}; "
+                        "pass --force to remove it"
+                    )
+            for name in HOOK_NAMES:
+                path = hook_file_path(repo_path, name)
+                if path.exists() or path.is_symlink():
+                    print(f"would remove {path}")
+            print("Dry run complete; no hook files or receipts changed.")
+            return 0
+        remove_hooks(repo_path, force=args.force)
+    except (CodeGraphHookError, OSError) as exc:
+        raise _codegraph_error(exc) from exc
+    print("CodeGraph hooks removed.")
+    return 0
+
+
 def _add_embedding_route_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embedding-provider",
@@ -3239,6 +3376,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="show removals without changing client configuration or receipts",
     )
     codegraph_uninstall_parser.set_defaults(handler=_run_codegraph_uninstall)
+
+    codegraph_hook_parser = codegraph_subparsers.add_parser(
+        "hook",
+        help="keep CodeGraph indexes fresh across commits and pulls",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    hook_subparsers = codegraph_hook_parser.add_subparsers(
+        dest="hook_command",
+        required=True,
+    )
+    hook_parsers: dict[str, argparse.ArgumentParser] = {}
+    for hook_command in ("install", "status", "uninstall"):
+        hook_parser = hook_subparsers.add_parser(
+            hook_command,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
+        hook_parser.add_argument("repo", nargs="?", default=".")
+        if hook_command in ("install", "status"):
+            hook_parser.add_argument(
+                "--mode",
+                choices=("background", "sync", "off"),
+                default=None,
+                help="hook execution mode (default: CODENIB_HOOK_MODE or background)",
+            )
+        if hook_command == "install":
+            hook_parser.add_argument(
+                "--embedding-batch-size",
+                type=int,
+                default=None,
+                help="encode batch size recorded into the hook command",
+            )
+            hook_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="overwrite hook files not installed by codenib",
+            )
+        if hook_command == "uninstall":
+            hook_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="remove hook files even when their content has drifted",
+            )
+        if hook_command in ("install", "uninstall"):
+            hook_parser.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="show hook changes without writing hook files or receipts",
+            )
+        if hook_command == "status":
+            hook_parser.add_argument(
+                "--json",
+                action="store_true",
+                help="print a machine-readable hook report",
+            )
+        hook_parsers[hook_command] = hook_parser
+    hook_parsers["install"].set_defaults(handler=_run_codegraph_hook_install)
+    hook_parsers["status"].set_defaults(handler=_run_codegraph_hook_status)
+    hook_parsers["uninstall"].set_defaults(handler=_run_codegraph_hook_uninstall)
 
     toolchain_parser = subparsers.add_parser(
         "toolchain",
