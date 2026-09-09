@@ -160,6 +160,35 @@ builder or recovering incompatible state:
 codenib codegraph init . --rebuild
 ```
 
+## Automatic updates
+
+Keep indexes fresh across commits, pulls, and branch switches without a
+daemon. Install detached git hooks into the target checkout (`.git/hooks/`
+is never committed, so reinstall per clone):
+
+```bash
+codenib codegraph hook install /path/to/repository \
+  --embedding-batch-size 2
+codenib codegraph hook status /path/to/repository
+```
+
+`post-commit`, `post-merge`, and `post-checkout` each trigger
+`codenib index <repo> --preset auto` in the background and always exit 0,
+so a slow or failed rebuild never blocks your git operation. When nothing
+changed, the currency fast-path no-ops in about a second. Tune per machine
+without reinstalling:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `CODENIB_HOOK_MODE` | `background`, `sync`, or `off` | `background` |
+| `CODENIB_HOOK_TIMEOUT` | kill the background rebuild after N seconds | unset (no timeout) |
+| `CODENIB_EMBEDDING_BATCH_SIZE` | fallback encode batch size (small GPUs: `2`) | model default |
+
+Hooks refuse to overwrite hook files they did not write (use `--force`),
+and `codenib codegraph hook uninstall` removes only CodeNib-managed hooks.
+Indexes and MCP registrations are preserved. A dirty tree keeps views
+`stale` by design — commit first, then let the hook rebuild.
+
 ## Safe uninstall
 
 Remove the client registrations without deleting the reusable index:
