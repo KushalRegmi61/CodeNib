@@ -518,6 +518,7 @@ def _prepare_index_compiler(
     embedding_dimension: int | None = None,
     embedding_endpoint: str | None = None,
     embedding_credential_env: str | None = None,
+    embedding_batch_size: int | None = None,
     allow_graph_project_preparation: bool = True,
     allow_partial_graph_languages: bool = True,
 ) -> tuple[object, Path]:
@@ -546,6 +547,7 @@ def _prepare_index_compiler(
         ),
         embedding_endpoint=embedding_endpoint,
         embedding_credential_env=embedding_credential_env,
+        embedding_batch_size=embedding_batch_size,
         allow_partial_graph_languages=allow_partial_graph_languages,
         allow_graph_project_preparation=allow_graph_project_preparation,
         source_selection=source_selection,
@@ -574,6 +576,7 @@ def index_repository(
     embedding_dimension: int | None = None,
     embedding_endpoint: str | None = None,
     embedding_credential_env: str | None = None,
+    embedding_batch_size: int | None = None,
     allow_graph_project_preparation: bool = True,
     allow_partial_graph_languages: bool = True,
 ):
@@ -590,6 +593,7 @@ def index_repository(
         embedding_dimension=embedding_dimension,
         embedding_endpoint=embedding_endpoint,
         embedding_credential_env=embedding_credential_env,
+        embedding_batch_size=embedding_batch_size,
         allow_graph_project_preparation=allow_graph_project_preparation,
         allow_partial_graph_languages=allow_partial_graph_languages,
     )
@@ -669,11 +673,22 @@ def _run_index(
             raise CLIError(str(exc)) from exc
     else:
         _check_view_dependencies(views)
+    batch_size = _optional_int(
+        getattr(args, "embedding_batch_size", None)
+        or os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE"),
+        source="--embedding-batch-size",
+    )
+    if batch_size is not None and embedding_route is not None:
+        if embedding_route.provider != "huggingface":
+            raise CLIError(
+                "--embedding-batch-size requires the huggingface embedding provider"
+            )
     index_kwargs = {
         "languages": languages,
         "views": views,
         "source_selection": resolved_selection.selection,
         "rebuild": args.rebuild,
+        "embedding_batch_size": batch_size,
     }
     if embedding_route is not None:
         index_kwargs.update(
@@ -1345,11 +1360,22 @@ def _run_wiki(args: argparse.Namespace) -> int:
         else:
             _check_view_dependencies(views)
 
+        batch_size = _optional_int(
+            getattr(args, "embedding_batch_size", None)
+            or os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE"),
+            source="--embedding-batch-size",
+        )
+        if batch_size is not None and build_embedding_route is not None:
+            if build_embedding_route.provider != "huggingface":
+                raise CLIError(
+                    "--embedding-batch-size requires the huggingface embedding provider"
+                )
         index_kwargs = {
             "languages": languages,
             "views": views,
             "source_selection": resolved_selection.selection,
             "rebuild": args.rebuild,
+            "embedding_batch_size": batch_size,
         }
         if build_embedding_route is not None:
             index_kwargs.update(
@@ -2770,6 +2796,12 @@ def _add_embedding_route_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embedding-api-key-env",
         help="environment variable containing the embedding API key",
+    )
+    parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=None,
+        help="encode batch size for local embedding builds (small GPUs: 2-4)",
     )
 
 

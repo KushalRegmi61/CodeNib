@@ -81,6 +81,61 @@ def test_index_parser_accepts_exact_source_exclusions() -> None:
     assert args.clear_exclude_dirs is False
 
 
+def test_index_parser_accepts_embedding_batch_size() -> None:
+    args = cli.build_parser().parse_args(
+        ["index", ".", "--view", "vector", "--embedding-batch-size", "2"]
+    )
+
+    assert args.embedding_batch_size == 2
+
+
+def test_index_parser_defaults_embedding_batch_size_to_none() -> None:
+    args = cli.build_parser().parse_args(["index", "."])
+
+    assert args.embedding_batch_size is None
+
+
+def test_embedding_batch_size_rejects_non_positive() -> None:
+    with pytest.raises(cli.CLIError):
+        cli._optional_int("0", source="--embedding-batch-size")
+
+
+def test_run_index_threads_embedding_batch_size_through(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n")
+    captured = {}
+
+    def fake_index(repo_path, **kwargs):
+        captured.update(repo_path=repo_path, **kwargs)
+        return (
+            SimpleNamespace(
+                repo_path=str(repo_path),
+                languages=kwargs["languages"],
+                indexes={"bm25": SimpleNamespace(status="fresh", metadata={})},
+            ),
+            [],
+        )
+
+    monkeypatch.setattr(cli, "index_repository", fake_index)
+
+    assert (
+        cli.run(
+            [
+                "index",
+                str(tmp_path),
+                "--preset",
+                "fast",
+                "--embedding-batch-size",
+                "2",
+            ]
+        )
+        == 0
+    )
+    assert captured["embedding_batch_size"] == 2
+
+
 def test_source_selection_flags_are_mutually_exclusive() -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.build_parser().parse_args(
@@ -859,13 +914,22 @@ def test_index_command_auto_preset_falls_back_without_dense_dependencies(
     captured = {}
     monkeypatch.setattr(cli, "_check_module", lambda _module: False)
 
-    def fake_index(repo_path, *, languages, views, source_selection, rebuild):
+    def fake_index(
+        repo_path,
+        *,
+        languages,
+        views,
+        source_selection,
+        rebuild,
+        embedding_batch_size=None,
+    ):
         captured.update(
             repo_path=repo_path,
             languages=languages,
             views=views,
             source_selection=source_selection,
             rebuild=rebuild,
+            embedding_batch_size=embedding_batch_size,
         )
         entry = SimpleNamespace(
             status="fresh",
@@ -887,6 +951,7 @@ def test_index_command_auto_preset_falls_back_without_dense_dependencies(
         "views": ["bm25"],
         "source_selection": RepositorySourceSelection(),
         "rebuild": False,
+        "embedding_batch_size": None,
     }
 
 
@@ -1086,8 +1151,17 @@ def test_graph_preset_selects_bm25_and_symbol_graph(
     (tmp_path / "sample.py").write_text("def sample():\n    return 1\n")
     captured = {}
 
-    def fake_index(repo_path, *, languages, views, source_selection, rebuild):
+    def fake_index(
+        repo_path,
+        *,
+        languages,
+        views,
+        source_selection,
+        rebuild,
+        embedding_batch_size=None,
+    ):
         assert source_selection == RepositorySourceSelection()
+        assert embedding_batch_size is None
         captured["views"] = views
         entries = {view: SimpleNamespace(status="fresh", metadata={}) for view in views}
         return (
