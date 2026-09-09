@@ -290,7 +290,7 @@ def test_write_hook_receipt_round_trip(tmp_path, monkeypatch) -> None:
     from codenib.paths import repo_state_dir
 
     repo = _isolated_repo(tmp_path, monkeypatch)
-    receipt = HookReceipt(repo.resolve(), "sync", 2, ("post-commit",))
+    receipt = HookReceipt(repo.resolve(), "sync", 2, HOOK_NAMES)
 
     path = write_hook_receipt(receipt)
 
@@ -362,3 +362,129 @@ def test_install_hooks_without_batch_size_skips_runtime_probe(
     )
 
     assert receipt.batch_size is None
+
+
+def test_hook_current_batch_size_is_boundary_aware(tmp_path, monkeypatch) -> None:
+    from codenib.codegraph_hooks import _hook_current
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    receipt = HookReceipt(repo.resolve(), "background", 2, HOOK_NAMES)
+
+    current = render_hook_script(
+        ("codenib", "index", str(repo), "--preset", "auto"), repo, batch_size=2
+    )
+    assert _hook_current(current, receipt, "post-commit") is True
+
+    drifted = current.replace("--embedding-batch-size 2", "--embedding-batch-size 20")
+    assert "--embedding-batch-size 20" in drifted
+    assert _hook_current(drifted, receipt, "post-commit") is False
+
+    assert _hook_current(current, None, "post-commit") is False
+
+
+def test_load_hook_receipt_rejects_subset_hooks(tmp_path, monkeypatch) -> None:
+    from codenib.paths import repo_state_dir
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    receipt_path = repo_state_dir(repo) / "codegraph" / "hooks.json"
+    receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": HOOK_RECEIPT_SCHEMA,
+                "repository": str(repo.resolve()),
+                "mode": "background",
+                "batch_size": None,
+                "hooks": {"post-commit": {"state": "installed"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CodeGraphHookError):
+        load_hook_receipt(repo)
+
+
+def test_load_hook_receipt_rejects_extra_hooks(tmp_path, monkeypatch) -> None:
+    from codenib.paths import repo_state_dir
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    receipt_path = repo_state_dir(repo) / "codegraph" / "hooks.json"
+    receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    hooks = {name: {"state": "installed"} for name in HOOK_NAMES}
+    hooks["post-rewrite"] = {"state": "installed"}
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": HOOK_RECEIPT_SCHEMA,
+                "repository": str(repo.resolve()),
+                "mode": "background",
+                "batch_size": None,
+                "hooks": hooks,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CodeGraphHookError):
+        load_hook_receipt(repo)
+
+
+def test_render_hook_script_quotes_state_dir_with_space_and_dollar(
+    tmp_path, monkeypatch
+) -> None:
+    import shlex
+    import subprocess
+
+    home = tmp_path / "ho me$dir"
+    monkeypatch.setenv("CODENIB_HOME", str(home))
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    from codenib.paths import repo_state_dir
+
+    state_dir = str(repo_state_dir(repo))
+    assert " " in state_dir and "$" in state_dir
+    script = render_hook_script(("codenib",), repo, batch_size=None)
+
+    assert f"lock={shlex.quote(f'{state_dir}/.hook.lock')}" in script
+    assert f"log={shlex.quote(f'{state_dir}/hook.log')}" in script
+    probe = tmp_path / "hook_probe.sh"
+    probe.write_text(script, encoding="utf-8")
+    completed = subprocess.run(
+        ["sh", "-n", str(probe)], capture_output=True, text=True, timeout=30
+    )
+    assert completed.returncode == 0
+
+
+def test_install_hooks_refuses_dangling_symlink_without_force(
+    tmp_path, monkeypatch
+) -> None:
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    target = hook_file_path(repo, "post-commit")
+    dangling = tmp_path / "nowhere-hook"
+    assert not dangling.exists()
+    target.symlink_to(dangling)
+
+    with pytest.raises(CodeGraphHookError):
+        install_hooks(
+            repo, mode="background", batch_size=None, codenib_argv=(sys.executable,)
+        )
+
+
+def test_resolve_hook_argv_rejects_non_executable_absolute(
+    tmp_path, monkeypatch
+) -> None:
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    candidate = tmp_path / "not-executable"
+    candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    candidate.chmod(0o644)
+
+    with pytest.raises(CodeGraphHookError, match="not executable"):
+        install_hooks(
+            repo,
+            mode="background",
+            batch_size=None,
+            codenib_argv=(str(candidate),),
+            dry_run=True,
+        )

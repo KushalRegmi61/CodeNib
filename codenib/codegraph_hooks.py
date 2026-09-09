@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -124,12 +125,12 @@ def render_hook_script(
                 'if [ "${CODENIB_HOOK_MODE:-background}" = "off" ]; then',
                 "    exit 0",
                 "fi",
-                f'lock="{state_dir}/.hook.lock"',
+                f"lock={shlex.quote(f'{state_dir}/.hook.lock')}",
                 'if ! mkdir "$lock" 2>/dev/null; then',
                 "    exit 0",
                 "fi",
                 "trap 'rmdir \"$lock\"' EXIT INT TERM",
-                f'log="{state_dir}/hook.log"',
+                f"log={shlex.quote(f'{state_dir}/hook.log')}",
                 'if [ "${CODENIB_HOOK_MODE:-background}" = "sync" ]; then',
                 f'    {command} >>"$log" 2>&1',
                 "else",
@@ -156,6 +157,10 @@ def _resolve_hook_argv(codenib_argv: tuple[str, ...]) -> tuple[str, ...]:
             resolved, extra = resolve_codenib_command(None)
         elif os.path.isabs(prefix[0]):
             resolved, extra = prefix[0], prefix[1:]
+            if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+                raise CodeGraphHookError(
+                    f"CodeNib command is not executable: {resolved}"
+                )
         else:
             resolved, extra = resolve_codenib_command(prefix[0])
             extra = (*extra, *prefix[1:])
@@ -219,7 +224,7 @@ def install_hooks(
     script = render_hook_script(argv, repository, batch_size)
     for name in HOOK_NAMES:
         path = hook_file_path(repository, name)
-        if path.exists():
+        if path.exists() or path.is_symlink():
             try:
                 observed = path.read_text(encoding="utf-8")
             except OSError as exc:
@@ -249,7 +254,10 @@ def _hook_current(content: str, receipt: HookReceipt | None, name: str) -> bool:
         return False
     if receipt.batch_size is None:
         return "--embedding-batch-size" not in content
-    return f"--embedding-batch-size {receipt.batch_size}" in content
+    return (
+        re.search(rf"--embedding-batch-size\s+{receipt.batch_size}(?!\d)", content)
+        is not None
+    )
 
 
 def inspect_hooks(repo: Path, receipt: HookReceipt | None) -> list[HookInspection]:
@@ -368,7 +376,7 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
     if batch_size is not None and (type(batch_size) is not int or batch_size <= 0):
         raise CodeGraphHookError("invalid CodeGraph hook receipt field: batch_size")
     hooks_value = root["hooks"]
-    if type(hooks_value) is not dict or not set(hooks_value).issubset(HOOK_NAMES):
+    if type(hooks_value) is not dict or set(hooks_value) != set(HOOK_NAMES):
         raise CodeGraphHookError("invalid CodeGraph hook receipt object: hooks")
     for name, entry in hooks_value.items():
         if (

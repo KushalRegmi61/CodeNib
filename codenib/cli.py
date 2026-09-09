@@ -82,6 +82,15 @@ def _optional_int(value: object, *, source: str) -> int | None:
     return parsed
 
 
+def _resolve_embedding_batch_size(args: argparse.Namespace) -> int | None:
+    """Resolve flag>env>None batch size without dropping an explicit 0."""
+
+    raw = getattr(args, "embedding_batch_size", None)
+    if raw is None:
+        raw = os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE")
+    return _optional_int(raw, source="--embedding-batch-size")
+
+
 def _embedding_route_for_args(args: argparse.Namespace) -> InferenceRoute:
     """Resolve the secret-free embedding identity selected by CLI and env."""
 
@@ -673,11 +682,7 @@ def _run_index(
             raise CLIError(str(exc)) from exc
     else:
         _check_view_dependencies(views)
-    batch_size = _optional_int(
-        getattr(args, "embedding_batch_size", None)
-        or os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE"),
-        source="--embedding-batch-size",
-    )
+    batch_size = _resolve_embedding_batch_size(args)
     if batch_size is not None and embedding_route is not None:
         if embedding_route.provider != "huggingface":
             raise CLIError(
@@ -1360,11 +1365,7 @@ def _run_wiki(args: argparse.Namespace) -> int:
         else:
             _check_view_dependencies(views)
 
-        batch_size = _optional_int(
-            getattr(args, "embedding_batch_size", None)
-            or os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE"),
-            source="--embedding-batch-size",
-        )
+        batch_size = _resolve_embedding_batch_size(args)
         if batch_size is not None and build_embedding_route is not None:
             if build_embedding_route.provider != "huggingface":
                 raise CLIError(
@@ -2786,11 +2787,7 @@ def _run_codegraph_hook_install(args: argparse.Namespace) -> int:
     )
 
     repo_path = resolve_repo_path(args.repo)
-    batch_size = _optional_int(
-        getattr(args, "embedding_batch_size", None)
-        or os.environ.get("CODENIB_EMBEDDING_BATCH_SIZE"),
-        source="--embedding-batch-size",
-    )
+    batch_size = _resolve_embedding_batch_size(args)
     try:
         command, prefix = resolve_codenib_command(args.server_command)
         receipt = install_hooks(

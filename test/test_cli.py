@@ -136,6 +136,186 @@ def test_run_index_threads_embedding_batch_size_through(
     assert captured["embedding_batch_size"] == 2
 
 
+def test_run_index_batch_size_zero_flag_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n")
+    monkeypatch.delenv("CODENIB_EMBEDDING_BATCH_SIZE", raising=False)
+    called = False
+
+    def unexpected_index(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("index_repository must not run for batch size 0")
+
+    monkeypatch.setattr(cli, "index_repository", unexpected_index)
+
+    assert (
+        cli.run(
+            ["index", str(tmp_path), "--preset", "fast", "--embedding-batch-size", "0"]
+        )
+        == 2
+    )
+    assert called is False
+    assert "--embedding-batch-size" in capsys.readouterr().err
+
+
+def test_run_index_batch_size_zero_env_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n")
+    monkeypatch.setenv("CODENIB_EMBEDDING_BATCH_SIZE", "0")
+    called = False
+
+    def unexpected_index(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("index_repository must not run for batch size 0")
+
+    monkeypatch.setattr(cli, "index_repository", unexpected_index)
+
+    assert cli.run(["index", str(tmp_path), "--preset", "fast"]) == 2
+    assert called is False
+    assert "--embedding-batch-size" in capsys.readouterr().err
+
+
+def test_run_index_batch_size_env_fallback_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n")
+    monkeypatch.setenv("CODENIB_EMBEDDING_BATCH_SIZE", "3")
+    captured = {}
+
+    def fake_index(repo_path, **kwargs):
+        captured.update(**kwargs)
+        return (
+            SimpleNamespace(
+                repo_path=str(repo_path),
+                languages=kwargs["languages"],
+                indexes={"bm25": SimpleNamespace(status="fresh", metadata={})},
+            ),
+            [],
+        )
+
+    monkeypatch.setattr(cli, "index_repository", fake_index)
+
+    assert cli.run(["index", str(tmp_path), "--preset", "fast"]) == 0
+    assert captured["embedding_batch_size"] == 3
+
+
+def test_run_index_batch_size_flag_beats_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n")
+    monkeypatch.setenv("CODENIB_EMBEDDING_BATCH_SIZE", "7")
+    captured = {}
+
+    def fake_index(repo_path, **kwargs):
+        captured.update(**kwargs)
+        return (
+            SimpleNamespace(
+                repo_path=str(repo_path),
+                languages=kwargs["languages"],
+                indexes={"bm25": SimpleNamespace(status="fresh", metadata={})},
+            ),
+            [],
+        )
+
+    monkeypatch.setattr(cli, "index_repository", fake_index)
+
+    assert (
+        cli.run(
+            [
+                "index",
+                str(tmp_path),
+                "--preset",
+                "fast",
+                "--embedding-batch-size",
+                "2",
+            ]
+        )
+        == 0
+    )
+    assert captured["embedding_batch_size"] == 2
+
+
+def test_run_index_batch_size_rejects_non_huggingface_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    (tmp_path / "sample.py").write_text("VALUE = 1\n")
+    monkeypatch.delenv("CODENIB_EMBEDDING_BATCH_SIZE", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    called = False
+
+    def unexpected_index(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("index_repository must not run for rejected provider")
+
+    monkeypatch.setattr(cli, "index_repository", unexpected_index)
+
+    assert (
+        cli.run(
+            [
+                "index",
+                str(tmp_path),
+                "--preset",
+                "semantic",
+                "--embedding-provider",
+                "openai",
+                "--embedding-batch-size",
+                "2",
+            ]
+        )
+        == 2
+    )
+    assert called is False
+    assert "huggingface" in capsys.readouterr().err
+
+
+def test_run_hook_install_batch_size_zero_flag_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CODENIB_EMBEDDING_BATCH_SIZE", raising=False)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    args = cli.build_parser().parse_args(
+        [
+            "codegraph",
+            "hook",
+            "install",
+            str(repo),
+            "--embedding-batch-size",
+            "0",
+        ]
+    )
+
+    with pytest.raises(cli.CLIError, match="--embedding-batch-size"):
+        cli._run_codegraph_hook_install(args)
+
+
+def test_run_hook_install_batch_size_env_fallback_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import codenib.codegraph_hooks as hooks
+
+    monkeypatch.setenv("CODENIB_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODENIB_EMBEDDING_BATCH_SIZE", "5")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    captured: dict = {}
+
+    def fake_install(repo_path, *, mode, batch_size, codenib_argv, force, dry_run):
+        captured["batch_size"] = batch_size
+        return SimpleNamespace(hooks=("post-commit",), mode=mode)
+
+    monkeypatch.setattr(hooks, "install_hooks", fake_install)
+    args = cli.build_parser().parse_args(["codegraph", "hook", "install", str(repo)])
+
+    assert cli._run_codegraph_hook_install(args) == 0
+    assert captured["batch_size"] == 5
+
+
 def test_source_selection_flags_are_mutually_exclusive() -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.build_parser().parse_args(

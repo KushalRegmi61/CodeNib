@@ -23,7 +23,7 @@ pytestmark = pytest.mark.integration_serial
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
-        ["git", *args], cwd=repo, check=True, capture_output=True, timeout=60
+        ["git", *args], cwd=repo, check=True, capture_output=True, timeout=180
     )
 
 
@@ -43,6 +43,9 @@ def scratch_repo(tmp_path: Path, monkeypatch) -> Path:
 
 
 def test_hook_lifecycle_refreshes_index_on_commit(scratch_repo: Path) -> None:
+    import json
+    import time
+
     from codenib.cli import index_repository
     from codenib.paths import repo_state_dir
 
@@ -58,12 +61,25 @@ def test_hook_lifecycle_refreshes_index_on_commit(scratch_repo: Path) -> None:
         assert HOOK_MARKER in content
     assert load_hook_receipt(scratch_repo) is not None
 
+    state_dir = repo_state_dir(scratch_repo)
+    manifest_path = state_dir / "indexes" / "repo_manifest.json"
+    assert manifest_path.is_file()
+    log_path = state_dir / "hook.log"
+    manifest_mtime_before = manifest_path.stat().st_mtime_ns
+    log_size_before = log_path.stat().st_size if log_path.is_file() else 0
+
+    time.sleep(0.05)
     (scratch_repo / "b.py").write_text("y = 2\n")
     _git(scratch_repo, "add", ".")
     _git(scratch_repo, "commit", "-m", "second")
 
-    manifest_path = repo_state_dir(scratch_repo) / "indexes" / "repo_manifest.json"
     assert manifest_path.is_file()
+    assert manifest_path.stat().st_mtime_ns > manifest_mtime_before
+    assert log_path.is_file()
+    assert log_path.stat().st_size > log_size_before
+    documents_path = state_dir / "indexes" / "bm25" / "documents.json"
+    assert documents_path.is_file()
+    assert "b.py" in documents_path.read_text(encoding="utf-8")
 
     remove_hooks(scratch_repo, force=False)
     assert load_hook_receipt(scratch_repo) is None

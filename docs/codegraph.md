@@ -184,6 +184,8 @@ without reinstalling:
 | `CODENIB_HOOK_TIMEOUT` | kill the background rebuild after N seconds | unset (no timeout) |
 | `CODENIB_EMBEDDING_BATCH_SIZE` | fallback encode batch size (small GPUs: `2`) | model default |
 
+Hooks track `--preset auto` semantics, and `hook status` checks installation
+currency against the receipt, not command drift.
 Hooks refuse to overwrite hook files they did not write (use `--force`),
 and `codenib codegraph hook uninstall` removes only CodeNib-managed hooks.
 Pass `hook install --command` to override the recorded CodeNib executable
