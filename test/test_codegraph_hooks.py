@@ -20,6 +20,7 @@ from codenib.codegraph_hooks import (
     HookInspection,
     HookReceipt,
     hook_file_path,
+    hook_runtime_supports_batch_size,
     inspect_hooks,
     install_hooks,
     load_hook_receipt,
@@ -150,7 +151,7 @@ def test_install_hooks_refuses_foreign_hook_without_force(
         repo,
         mode="sync",
         batch_size=2,
-        codenib_argv=(sys.executable,),
+        codenib_argv=(sys.executable, "-m", "codenib"),
         force=True,
     )
     assert receipt.mode == "sync"
@@ -178,7 +179,7 @@ def test_install_hooks_dry_run_writes_nothing(tmp_path, monkeypatch) -> None:
 def test_hook_receipt_round_trip_and_repo_mismatch(tmp_path, monkeypatch) -> None:
     repo = _isolated_repo(tmp_path, monkeypatch)
     receipt = install_hooks(
-        repo, mode="off", batch_size=4, codenib_argv=(sys.executable,)
+        repo, mode="off", batch_size=4, codenib_argv=(sys.executable, "-m", "codenib")
     )
 
     loaded = load_hook_receipt(repo)
@@ -269,3 +270,46 @@ def test_render_hook_script_uses_portable_single_flight_lock() -> None:
 
     assert 'mkdir "$lock" 2>/dev/null' in script
     assert "flock" not in script
+
+
+def test_hook_runtime_supports_batch_size_for_current_runtime() -> None:
+    assert hook_runtime_supports_batch_size((sys.executable, "-m", "codenib")) is True
+
+
+def test_hook_runtime_supports_batch_size_rejects_silent_runtime() -> None:
+    assert hook_runtime_supports_batch_size(("/bin/true",)) is False
+
+
+def test_hook_runtime_supports_batch_size_handles_missing_binary() -> None:
+    assert hook_runtime_supports_batch_size(("/nonexistent-codenib-xyz",)) is False
+
+
+def test_install_hooks_rejects_batch_size_for_stale_runtime(
+    tmp_path, monkeypatch
+) -> None:
+    repo = _isolated_repo(tmp_path, monkeypatch)
+
+    with pytest.raises(CodeGraphHookError, match="--embedding-batch-size"):
+        install_hooks(
+            repo,
+            mode="background",
+            batch_size=2,
+            codenib_argv=("/bin/true",),
+            dry_run=True,
+        )
+
+
+def test_install_hooks_without_batch_size_skips_runtime_probe(
+    tmp_path, monkeypatch
+) -> None:
+    repo = _isolated_repo(tmp_path, monkeypatch)
+
+    receipt = install_hooks(
+        repo,
+        mode="background",
+        batch_size=None,
+        codenib_argv=("/bin/true",),
+        dry_run=True,
+    )
+
+    assert receipt.batch_size is None

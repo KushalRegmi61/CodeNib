@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from .codegraph_onboarding import (
     CodeGraphOnboardingError,
@@ -168,6 +169,23 @@ def _check_batch_size(batch_size: int | None) -> None:
         raise CodeGraphHookError(f"invalid CodeGraph hook batch size: {batch_size!r}")
 
 
+def hook_runtime_supports_batch_size(
+    command: Sequence[str], *, timeout: int = 10
+) -> bool:
+    """Whether ``<command> index --help`` advertises --embedding-batch-size."""
+
+    try:
+        completed = subprocess.run(
+            [*command, "index", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return False
+    return completed.returncode == 0 and "--embedding-batch-size" in completed.stdout
+
+
 def install_hooks(
     repo: Path,
     *,
@@ -191,6 +209,12 @@ def install_hooks(
             f"cannot install CodeGraph hooks: {repository} is not a git checkout"
         )
     command = _resolve_hook_argv(codenib_argv)
+    if batch_size is not None and not hook_runtime_supports_batch_size(command):
+        raise CodeGraphHookError(
+            f"CodeGraph hook runtime {command[0]!r} does not support "
+            "--embedding-batch-size; pass --command pointing at a codenib "
+            "that supports the flag, or reinstall without --embedding-batch-size"
+        )
     argv = (*command, "index", str(repository), "--preset", "auto")
     script = render_hook_script(argv, repository, batch_size)
     for name in HOOK_NAMES:
@@ -399,6 +423,7 @@ __all__ = [
     "HookReceipt",
     "hook_file_path",
     "hook_receipt_path",
+    "hook_runtime_supports_batch_size",
     "inspect_hooks",
     "install_hooks",
     "load_hook_receipt",
