@@ -13,10 +13,13 @@ NODE_TYPE_CLASS = "class"
 NODE_TYPE_FUNCTION = "function"
 NODE_TYPE_METHOD = "method"
 NODE_TYPE_FIELD = "field"
+NODE_TYPE_WORKSPACE = "workspace"
+NODE_TYPE_PROJECT = "project"
 EDGE_TYPE_CONTAIN = "contain"
 EDGE_TYPE_REFERENCE = "reference"
 EDGE_TYPE_IMPORT = "import"
 EDGE_TYPE_TYPE_USE = "type-use"
+EDGE_TYPE_MANIFEST_DEPENDENCY = "depends_on_manifest"
 ROOT_NODE = "."
 
 GRAPH_LAYER_ALL = "all"
@@ -25,12 +28,14 @@ GRAPH_LAYER_DEPENDENCY = "dependency"
 GRAPH_LAYER_REFERENCE = "reference"
 GRAPH_LAYER_IMPORT = "import"
 GRAPH_LAYER_TYPE_USE = "type-use"
+GRAPH_LAYER_ARCHITECTURE = "architecture"
 
 DEPENDENCY_EDGE_TYPES = frozenset(
     {
         EDGE_TYPE_REFERENCE,
         EDGE_TYPE_IMPORT,
         EDGE_TYPE_TYPE_USE,
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
     }
 )
 
@@ -41,6 +46,13 @@ GRAPH_LAYER_EDGE_TYPES = {
     GRAPH_LAYER_REFERENCE: frozenset({EDGE_TYPE_REFERENCE}),
     GRAPH_LAYER_IMPORT: frozenset({EDGE_TYPE_IMPORT}),
     GRAPH_LAYER_TYPE_USE: frozenset({EDGE_TYPE_TYPE_USE}),
+    # NOTE: EDGE_TYPE_CONTAIN covers every structural edge (workspace->project
+    # and file->symbol alike). The first architecture query must filter by
+    # node type (is_architecture_node) rather than relying on this layer
+    # alone; see is_source_node() for the source-side counterpart.
+    GRAPH_LAYER_ARCHITECTURE: frozenset(
+        {EDGE_TYPE_CONTAIN, EDGE_TYPE_MANIFEST_DEPENDENCY}
+    ),
 }
 
 # Symbol types - for compatibility, keep NODE_TYPE_SYMBOL but add specific types
@@ -88,6 +100,28 @@ LSP_SYMBOL_KINDS = {
 def is_symbol_node(node_type):
     """Whether ``node_type`` is any symbol (class/function/method/generic)."""
     return node_type in SYMBOL_TYPES
+
+
+def is_architecture_node(node_type):
+    """Whether *node_type* belongs to the workspace/project architecture."""
+
+    return node_type in {NODE_TYPE_WORKSPACE, NODE_TYPE_PROJECT}
+
+
+def is_source_node(node_type):
+    """Whether *node_type* is a source graph node.
+
+    The root and directory nodes are structural source nodes; workspace and
+    project nodes are deliberately excluded so existing source queries do not
+    accidentally traverse the architecture overlay.
+    """
+
+    return node_type in {
+        "root",
+        NODE_TYPE_DIRECTORY,
+        NODE_TYPE_FILE,
+        *SYMBOL_TYPES,
+    }
 
 
 def node_has_definition(attributes: Mapping) -> bool:

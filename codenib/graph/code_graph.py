@@ -13,21 +13,13 @@ from typing import Dict, List, Optional, Tuple
 import igraph as ig
 
 from .. import compat_pickle
-from ..types import (
-    EDGE_TYPE_CONTAIN,
-    EDGE_TYPE_REFERENCE,
-    GRAPH_LAYER_REFERENCE,
-    NODE_TYPE_CLASS,
-    NODE_TYPE_DIRECTORY,
-    NODE_TYPE_FIELD,
-    NODE_TYPE_FILE,
-    NODE_TYPE_FUNCTION,
-    NODE_TYPE_METHOD,
-    NODE_TYPE_SYMBOL,
-    edge_types_for_graph_layer,
-    is_symbol_node,
-    node_has_definition,
-)
+from ..types import (EDGE_TYPE_CONTAIN, EDGE_TYPE_REFERENCE,
+                     GRAPH_LAYER_REFERENCE, NODE_TYPE_CLASS,
+                     NODE_TYPE_DIRECTORY, NODE_TYPE_FIELD, NODE_TYPE_FILE,
+                     NODE_TYPE_FUNCTION, NODE_TYPE_METHOD, NODE_TYPE_PROJECT,
+                     NODE_TYPE_SYMBOL, NODE_TYPE_WORKSPACE,
+                     edge_types_for_graph_layer, is_symbol_node,
+                     node_has_definition)
 
 # Bump when the persisted graph schema changes (vertex/edge attributes,
 # top-level pickle keys). load_graph() refuses mismatching pickles so stale
@@ -41,6 +33,10 @@ from ..types import (
 #     selection_line, independently from the symbol scope range.
 # v5: symbol vertices carry optional semantic symbol_kind plus explicit
 #     has_definition provenance; decoders may emit anchored import edges.
+# NOTE: workspace/project node-type constants and in-memory architecture
+#     helpers are intentionally NOT a schema bump — no persisted vertex/edge
+#     attribute or pickle key changes until graph enrichment lands (with C++
+#     decoder parity), so existing graph.pkl caches keep loading.
 _SCHEMA_VERSION = 5
 
 
@@ -152,6 +148,9 @@ class CodeGraph:
         self.symbol_ranges = {}
         # Map symbol names to vertex IDs
         self.name_to_vertex = {}
+        # Canonical repository file path -> vertex id. This is separate from
+        # ``_file_nodes``, which is the line-range index.
+        self._file_vertex_by_path: Dict[str, int] = {}
 
         # Range indexes — per-file, populated by build_range_indexes() after the
         # graph is fully built or after a patcher batch. Pickled with the graph.
@@ -190,7 +189,8 @@ class CodeGraph:
         self.current_file = file_path
 
         # Add vertex for file
-        self._add_vertex(file_path, {"type": NODE_TYPE_FILE})
+        vertex_id = self._add_vertex(file_path, {"type": NODE_TYPE_FILE})
+        self._file_vertex_by_path[file_path] = vertex_id
 
         self.current_scope = file_path
         # File scope has no range (special case)
@@ -387,6 +387,48 @@ class CodeGraph:
                 self.graph.vs[vertex_id][key] = value
 
         return vertex_id
+
+    def add_architecture_vertex(self, name, attributes=None):
+        """Add one workspace/project vertex through the graph boundary."""
+
+        if not attributes or attributes.get("type") not in {
+            NODE_TYPE_WORKSPACE,
+            NODE_TYPE_PROJECT,
+        }:
+            raise ValueError("architecture vertices require workspace/project type")
+        if "file" in attributes:
+            raise ValueError("architecture vertices must not carry a file attribute")
+        existing_id = self.name_to_vertex.get(name)
+        if existing_id is not None:
+            existing_type = self.graph.vs[existing_id].attributes().get("type")
+            if existing_type not in {NODE_TYPE_WORKSPACE, NODE_TYPE_PROJECT}:
+                raise ValueError(
+                    f"architecture vertex {name!r} collides with existing "
+                    f"{existing_type!r} vertex"
+                )
+        return self._add_vertex(name, dict(attributes))
+
+    def file_vertex_id(self, file_path: str):
+        """Return the vertex id for a repository file, if present."""
+
+        return self._file_vertex_by_path.get(file_path)
+
+    def iter_file_vertex_ids(self):
+        """Yield repository file vertex ids in graph order."""
+
+        for vertex in self.graph.vs:
+            if vertex.attributes().get("type") == NODE_TYPE_FILE:
+                yield vertex.index
+
+    def rebuild_file_vertex_index(self) -> None:
+        """Rebuild the path index after graph merges or vertex deletion."""
+
+        self._file_vertex_by_path = {
+            vertex["name"]: vertex.index
+            for vertex in self.graph.vs
+            if vertex.attributes().get("type") == NODE_TYPE_FILE
+            and isinstance(vertex.attributes().get("name"), str)
+        }
 
     def _add_edge(
         self,
@@ -647,6 +689,7 @@ class CodeGraph:
                 )
 
         self.symbol_ranges.update(other.symbol_ranges)
+        self.rebuild_file_vertex_index()
         self.build_range_indexes()
 
     def query_range(
@@ -871,6 +914,9 @@ class CodeGraph:
         graph_instance._file_nodes = data.get("file_nodes", {})
         graph_instance._file_edge_anchors = data.get("file_edge_anchors", {})
         graph_instance._unified_to_names = data.get("unified_to_names", {})
+        # The path index is derived from vertex attributes (same discipline as
+        # unified_index()): rebuild it so loaded graphs answer file_vertex_id().
+        graph_instance.rebuild_file_vertex_index()
 
         return graph_instance
 
