@@ -8,7 +8,12 @@ from typing import List, Optional, Set
 import igraph as ig
 
 from ..log_utils import get_logger
-from ..types import NodeInfo, is_symbol_node, node_is_reference_only
+from ..types import (
+    NodeInfo,
+    is_architecture_node,
+    is_symbol_node,
+    node_is_reference_only,
+)
 from ..utils import is_test_file
 from .code_graph import CodeGraph
 
@@ -300,6 +305,10 @@ class ROISubgraph:
             for eid in edge_ids:
                 e = self.full_graph.es[eid]
                 neighbor = e.target if e.source == node_id else e.source
+                if is_architecture_node(
+                    self.full_graph.vs[neighbor].attributes().get("type")
+                ):
+                    continue
                 if neighbor not in seen:
                     seen.add(neighbor)
                     result.append(neighbor)
@@ -317,6 +326,10 @@ class ROISubgraph:
                 if e["type"] not in edge_types:
                     continue
                 neighbor = e.target if e.source == node_id else e.source
+                if is_architecture_node(
+                    self.full_graph.vs[neighbor].attributes().get("type")
+                ):
+                    continue
                 if neighbor in seen:
                     continue
                 seen.add(neighbor)

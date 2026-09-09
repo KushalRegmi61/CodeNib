@@ -200,6 +200,31 @@ void require_text(const std::string &value, std::string_view label) {
     throw std::invalid_argument(std::string(label) + " must not be empty");
 }
 
+void require_project_id(const std::optional<std::string> &value,
+                        std::string_view label) {
+  if (!value.has_value())
+    return;
+  if (value->rfind("project://", 0) != 0 || value->size() == 10 ||
+      value->find('\\') != std::string::npos || value->find('\0') != std::string::npos)
+    throw std::invalid_argument(std::string(label) + " must be a canonical project:// id");
+}
+
+void require_workspace_id(const std::optional<std::string> &value,
+                          std::string_view label) {
+  if (!value.has_value())
+    return;
+  if (value->rfind("workspace://", 0) != 0 || value->size() == 12 ||
+      value->find('\\') != std::string::npos || value->find('\0') != std::string::npos)
+    throw std::invalid_argument(std::string(label) + " must be a canonical workspace:// id");
+}
+
+std::uint32_t optional_bool_flags(const std::optional<bool> &value,
+                                  unsigned shift) {
+  if (!value.has_value())
+    return 0U;
+  return (*value ? 2U : 1U) << shift;
+}
+
 struct SymbolRecord {
   std::uint32_t batch_index;
   std::string_view symbol_id;
@@ -293,6 +318,18 @@ encode_fact_batch_buffer(const std::vector<CodeGraph::VertexData> &vertices,
 
   std::set<std::string> file_paths;
   for (const auto &vertex : vertices) {
+    require_project_id(vertex.project_id, "vertex project_id");
+    require_workspace_id(vertex.workspace_id, "vertex workspace_id");
+    if (vertex.type == NODE_TYPE_WORKSPACE) {
+      if (!vertex.workspace_id.has_value() || *vertex.workspace_id != vertex.name ||
+          !vertex.workspace_path.has_value())
+        throw std::invalid_argument("workspace vertex is missing required attributes");
+    }
+    if (vertex.type == NODE_TYPE_PROJECT) {
+      if (!vertex.project_id.has_value() || *vertex.project_id != vertex.name ||
+          !vertex.project_path.has_value())
+        throw std::invalid_argument("project vertex is missing required attributes");
+    }
     if (vertex.type == NODE_TYPE_FILE)
       file_paths.insert(normalize_path(vertex.name));
     if (vertex.file.has_value())
@@ -314,6 +351,23 @@ encode_fact_batch_buffer(const std::vector<CodeGraph::VertexData> &vertices,
     if (source >= vertices.size() || target >= vertices.size())
       throw std::out_of_range(
           "CodeGraph edge endpoint is outside vertex table");
+    const bool architecture = vertices[source].type == NODE_TYPE_WORKSPACE ||
+                               vertices[source].type == NODE_TYPE_PROJECT ||
+                               vertices[target].type == NODE_TYPE_WORKSPACE ||
+                               vertices[target].type == NODE_TYPE_PROJECT;
+    if (architecture) {
+      const auto source_type = vertices[source].type;
+      const auto target_type = vertices[target].type;
+      const bool valid =
+          (edge.type == EDGE_TYPE_CONTAIN &&
+           ((source_type == NODE_TYPE_WORKSPACE &&
+             target_type == NODE_TYPE_PROJECT) ||
+            (source_type == NODE_TYPE_PROJECT && target_type == NODE_TYPE_FILE))) ||
+          (edge.type == EDGE_TYPE_MANIFEST_DEPENDENCY &&
+           source_type == NODE_TYPE_PROJECT && target_type == NODE_TYPE_PROJECT);
+      if (!valid || edge.anchor_file.has_value() || edge.anchor_line.has_value())
+        throw std::invalid_argument("invalid anchored or typed architecture edge");
+    }
     if (edge.type == EDGE_TYPE_CONTAIN &&
         is_symbol_type(vertices[source].type) &&
         is_symbol_type(vertices[target].type))
@@ -479,6 +533,12 @@ encode_fact_batch_buffer(const std::vector<CodeGraph::VertexData> &vertices,
       append_ref(result.graph_vertices, arena.add(vertex.name));
       append_ref(result.graph_vertices, arena.add(vertex.type));
       append_ref(result.graph_vertices, arena.add(vertex.file));
+      append_ref(result.graph_vertices, arena.add(vertex.project_id));
+      append_ref(result.graph_vertices, arena.add(vertex.workspace_id));
+      append_ref(result.graph_vertices, arena.add(vertex.project_path));
+      append_ref(result.graph_vertices, arena.add(vertex.workspace_path));
+      append_ref(result.graph_vertices, arena.add(vertex.display_name));
+      append_ref(result.graph_vertices, arena.add(vertex.project_kind));
       append_ref(result.graph_vertices, arena.add(vertex.unified_name));
       append_ref(result.graph_vertices, arena.add(vertex.symbol_kind));
       append_u32(result.graph_vertices,
@@ -500,6 +560,10 @@ encode_fact_batch_buffer(const std::vector<CodeGraph::VertexData> &vertices,
         if (*vertex.has_definition)
           flags |= 1U << 1;
       }
+      flags |= optional_bool_flags(vertex.synthetic, 2);
+      flags |= optional_bool_flags(vertex.ownership_complete, 4);
+      flags |= optional_bool_flags(vertex.sharing_complete, 6);
+      flags |= optional_bool_flags(vertex.is_shared, 8);
       append_u32(result.graph_vertices, flags);
       require_row_size(result.graph_vertices, before,
                        FACT_GRAPH_VERTEX_ROW_SIZE, "graph vertex");

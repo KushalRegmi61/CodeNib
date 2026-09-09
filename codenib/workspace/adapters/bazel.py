@@ -8,10 +8,15 @@ import hashlib
 import re
 from pathlib import PurePosixPath
 
-from ..models import (DependencyRecord, ManifestRecord, ProjectRecord,
-                      project_id_for_path)
+from ..models import (
+    DependencyRecord,
+    ManifestRecord,
+    ProjectRecord,
+    project_id_for_path,
+)
 
 _LABEL_RE = re.compile(r"(?P<label>(?://[^\"']+|:[A-Za-z0-9_./+\-]+))")
+_LOAD_RE = re.compile(r"\bload\s*\([^)]*\)", re.DOTALL)
 
 
 class BazelAdapter:
@@ -70,7 +75,12 @@ class BazelAdapter:
         if record is None or record.kind != "bazel_package":
             return []
         text = str((record.data or {}).get("text", ""))
-        labels = sorted(set(match.group("label") for match in _LABEL_RE.finditer(text)))
+        # ``load`` labels identify Starlark extensions, not project
+        # dependencies. Remove complete calls before extracting package labels.
+        dependency_text = _LOAD_RE.sub("", text)
+        labels = sorted(
+            set(match.group("label") for match in _LABEL_RE.finditer(dependency_text))
+        )
         output = []
         for label in labels:
             if label.startswith("@"):

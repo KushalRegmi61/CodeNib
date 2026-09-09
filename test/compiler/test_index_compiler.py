@@ -1969,6 +1969,10 @@ class TestSymbolGraphBuilder:
             "codenib.scip_interface.query_surface.query_surface_sha256",
             lambda _graph: "c" * 64,
         )
+        monkeypatch.setattr(
+            "codenib.scip_interface.query_surface.source_query_surface_sha256",
+            lambda _graph: "c" * 64,
+        )
 
     def test_build_returns_status(self, monkeypatch, tmp_path):
         from codenib import ls_router
@@ -2011,8 +2015,8 @@ class TestSymbolGraphBuilder:
 
         assert status.index_type == "symbol_graph"
         assert status.state == IndexState.FRESH
-        assert status.metadata["node_count"] == 50
-        assert status.metadata["edge_count"] == 0
+        assert status.metadata["node_count"] == 52
+        assert status.metadata["edge_count"] == 50
         assert status.metadata["language"] == "python"
         assert status.metadata["languages"] == ["python"]
         assert status.metadata["builder_schema"] == 6

@@ -39,10 +39,23 @@ DEPENDENCY_EDGE_TYPES = frozenset(
     }
 )
 
+# Source-only dependency edges.  ``DEPENDENCY_EDGE_TYPES`` is retained as the
+# public union for callers that explicitly want every dependency relation, but
+# source graph consumers must not accidentally traverse the workspace overlay.
+SOURCE_DEPENDENCY_EDGE_TYPES = frozenset(
+    {
+        EDGE_TYPE_REFERENCE,
+        EDGE_TYPE_IMPORT,
+        EDGE_TYPE_TYPE_USE,
+    }
+)
+
+ARCHITECTURE_DEPENDENCY_EDGE_TYPES = frozenset({EDGE_TYPE_MANIFEST_DEPENDENCY})
+
 GRAPH_LAYER_EDGE_TYPES = {
     GRAPH_LAYER_ALL: None,
     GRAPH_LAYER_CONTAINMENT: frozenset({EDGE_TYPE_CONTAIN}),
-    GRAPH_LAYER_DEPENDENCY: DEPENDENCY_EDGE_TYPES,
+    GRAPH_LAYER_DEPENDENCY: SOURCE_DEPENDENCY_EDGE_TYPES,
     GRAPH_LAYER_REFERENCE: frozenset({EDGE_TYPE_REFERENCE}),
     GRAPH_LAYER_IMPORT: frozenset({EDGE_TYPE_IMPORT}),
     GRAPH_LAYER_TYPE_USE: frozenset({EDGE_TYPE_TYPE_USE}),
@@ -106,6 +119,12 @@ def is_architecture_node(node_type):
     """Whether *node_type* belongs to the workspace/project architecture."""
 
     return node_type in {NODE_TYPE_WORKSPACE, NODE_TYPE_PROJECT}
+
+
+def is_architecture_edge(edge_type):
+    """Whether *edge_type* belongs to the workspace/project overlay."""
+
+    return edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY
 
 
 def is_source_node(node_type):
@@ -198,6 +217,7 @@ class NodeInfo(BaseModel):
     end_line: Optional[int] = None
     score: Optional[float] = None
     content: Optional[str] = None
+    project_id: Optional[str] = None
 
 
 class QueriedNode(NodeInfo):

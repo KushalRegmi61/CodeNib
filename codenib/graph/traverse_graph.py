@@ -8,6 +8,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
+from ..types import is_architecture_node
 from ..utils import is_test_file
 from .code_graph import CodeGraph
 
@@ -98,6 +99,8 @@ class RepoDependencySearcher:
             return
 
         vertex_id = self.code_graph.name_to_vertex[nid]
+        if is_architecture_node(self.graph.vs[vertex_id].attributes().get("type")):
+            return
 
         # Pick incident edge sets for the requested direction(s).
         if direction == "forward":
@@ -128,6 +131,9 @@ class RepoDependencySearcher:
 
             neighbor_vertex = self.graph.vs[neighbor_id]
             neighbor_nid = neighbor_vertex["name"]
+
+            if is_architecture_node(neighbor_vertex.attributes().get("type")):
+                continue
 
             # Node-type filter
             if ntype_filter and (
@@ -242,6 +248,8 @@ def traverse_tree_structure(
                 neighbor_id = edge.target
                 neighbor_vertex = code_graph.graph.vs[neighbor_id]
                 neighbor = neighbor_vertex["name"]
+                if is_architecture_node(neighbor_vertex.attributes().get("type")):
+                    continue
                 neigh_type = (
                     neighbor_vertex["type"]
                     if "type" in neighbor_vertex.attributes()
@@ -271,6 +279,8 @@ def traverse_tree_structure(
                 neighbor_id = edge.source
                 neighbor_vertex = code_graph.graph.vs[neighbor_id]
                 neighbor = neighbor_vertex["name"]
+                if is_architecture_node(neighbor_vertex.attributes().get("type")):
+                    continue
                 neigh_type = (
                     neighbor_vertex["type"]
                     if "type" in neighbor_vertex.attributes()

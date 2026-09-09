@@ -25,6 +25,7 @@ from ._validation import (
     MAX_SOURCE_WINDOW_LINES,
     bounded_integer,
     required_text,
+    optional_project_id,
 )
 from .dependency import dependency_subgraph_impl
 from .lsp import lsp_route_impl, normalize_lsp_route_symbols
@@ -401,6 +402,7 @@ def explore_context_impl(
     direction: str = "both",
     include_dependencies: bool = True,
     filter_test: bool = False,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Return ranked, routed, dependency-aware source context in one call."""
 
@@ -417,6 +419,7 @@ def explore_context_impl(
     if normalized_direction not in _DIRECTIONS:
         raise ValueError("direction must be 'impact', 'dependencies', or 'both'.")
     normalized_symbols = normalize_lsp_route_symbols(symbols)
+    project_id = optional_project_id(project_id)
     profile = _BUDGETS[normalized_budget]
     window_limit = min(top_k, profile.max_windows)
 
@@ -435,6 +438,7 @@ def explore_context_impl(
                 budget=normalized_budget,
                 level="l2",
                 filter_test=bool(filter_test),
+                project_id=project_id,
             )
             retrieval_response = result
             payloads = result.get("results", [])

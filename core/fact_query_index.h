@@ -37,12 +37,14 @@ public:
     // single NUL byte. NUL is forbidden in an input path; the empty set hashes
     // the empty byte string. This framing is part of proof schema v1.
     std::string allowed_files_sha256;
-    // Stable binary digest of every query-visible vertex and edge field in
-    // immutable record order. See prove_filter_identity() for schema v1.
+    // Stable binary digest of the source-compatible vertex and edge projection
+    // in immutable record order. Workspace/project records are validated but
+    // excluded from this Phase 1a native surface.
     std::string query_surface_sha256;
     std::size_t record_count{0};
     std::size_t directory_count{0};
     std::size_t file_count{0};
+    std::size_t architecture_count{0};
     std::size_t definition_count{0};
     std::size_t reference_only_count{0};
     std::size_t edge_count{0};
@@ -131,9 +133,10 @@ public:
   // valid only when the independently computed native surface exactly matches
   // it.
   // ``query_surface_sha256`` schema v1 is framed as:
-  //   "CodeNib-FactQuery-Surface\0" || u32be(1) || u64be(V) ||
-  //   each vertex in immutable order || u64be(E) || each edge in immutable
-  //   order. A record starts with 'V' or 'E'. Required strings/integers start
+  //   "CodeNib-FactQuery-Surface\0" || u32be(1) || u64be(V_source) ||
+  //   each source vertex in immutable order || u64be(E_source) || each source
+  //   edge in immutable order. A record starts with 'V' or 'E'. Required
+  //   strings/integers start
   //   with 0x01, followed by u64be(length)+UTF-8 or signed i64be. Optional
   //   values use 0x00 for absent and otherwise the required encoding;
   //   optional bool uses 0x00 absent, 0x01 false, 0x02 true. Vertex fields are

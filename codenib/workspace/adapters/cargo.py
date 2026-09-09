@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import posixpath
 from pathlib import PurePosixPath
@@ -13,14 +14,59 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
-from ..models import (DependencyRecord, ManifestRecord, ProjectRecord,
-                      project_id_for_path)
+from ..models import (
+    DependencyRecord,
+    ManifestRecord,
+    ProjectRecord,
+    project_id_for_path,
+)
 from ..resolver import unique_name_index
 
 
 def _cargo_name(data):
     package = data.get("package", {})
     return package.get("name") if isinstance(package, dict) else None
+
+
+def _workspace_member_paths(records):
+    """Return explicit Cargo workspace members, or None for standalone repos."""
+
+    root = next(
+        (
+            record
+            for record in records
+            if record.kind == "cargo_manifest" and record.path == "Cargo.toml"
+        ),
+        None,
+    )
+    if root is None:
+        return None
+    workspace = (root.data or {}).get("workspace", {})
+    if not isinstance(workspace, dict):
+        return set()
+    members = workspace.get("members", [])
+    excludes = workspace.get("exclude", [])
+    if not isinstance(members, list):
+        return set()
+
+    def matches(path, patterns):
+        return any(
+            isinstance(pattern, str)
+            and (
+                fnmatch.fnmatch(path, pattern.rstrip("/"))
+                or fnmatch.fnmatch(path, pattern.rstrip("/") + "/**")
+            )
+            for pattern in patterns
+        )
+
+    paths = set()
+    for record in records:
+        if record.kind != "cargo_manifest":
+            continue
+        path = record.path[: -len("/Cargo.toml")] or "."
+        if path == "." or (matches(path, members) and not matches(path, excludes)):
+            paths.add(path)
+    return paths
 
 
 class CargoAdapter:
@@ -48,6 +94,7 @@ class CargoAdapter:
 
     @classmethod
     def create_projects(cls, records, context):
+        member_paths = _workspace_member_paths(records)
         for record in records:
             if record.kind != "cargo_manifest":
                 continue
@@ -55,6 +102,8 @@ class CargoAdapter:
             if not _cargo_name(data) and "workspace" not in data:
                 continue
             path = record.path[: -len("/Cargo.toml")] or "."
+            if member_paths is not None and path not in member_paths:
+                continue
             yield ProjectRecord(
                 project_id=project_id_for_path(path),
                 project_path=path,

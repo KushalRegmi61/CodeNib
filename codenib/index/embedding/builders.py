@@ -447,6 +447,7 @@ def build_hierarchical_vector_store(
     strict_chunking: bool = False,
     additional_ignore_dirs: Optional[List[str]] = None,
     source_selection: RepositorySourceSelection | None = None,
+    project_ownership_resolver: Any | None = None,
     artifact_metadata: Optional[Dict[str, Any]] = None,
     native_index_authorization: NativeIndexAuthorization | None = None,
     _atomic_publish: bool = True,
@@ -541,7 +542,7 @@ def build_hierarchical_vector_store(
     schema_8_documents = (
         isinstance(artifact_metadata, dict)
         and type(artifact_metadata.get("builder_schema")) is int
-        and artifact_metadata.get("builder_schema") == 8
+        and artifact_metadata.get("builder_schema") in {8, 9}
     )
     repo_cfg = RepoChunkingConfig(
         languages=languages,
@@ -572,6 +573,7 @@ def build_hierarchical_vector_store(
         ),
     }
 
+    project_ids_by_level: dict[str, list[str | None]] = {}
     for level in build_levels:
         cfg = level_configs.get(level)
         if not cfg:
@@ -591,6 +593,18 @@ def build_hierarchical_vector_store(
                 if schema_8_documents
                 else chunks
             )
+            project_ids_by_level[level] = [
+                (
+                    project_ownership_resolver(chunk.file)
+                    if project_ownership_resolver is not None
+                    else None
+                )
+                for chunk in chunks_by_level[level]
+            ]
+            if project_ownership_resolver is not None and any(
+                project_id is None for project_id in project_ids_by_level[level]
+            ):
+                raise ValueError(f"vector {level} has unresolved project ownership")
         _require_selected_paths(
             selected,
             (getattr(chunk, "file", None) for chunk in chunks_by_level[level]),
@@ -652,12 +666,34 @@ def build_hierarchical_vector_store(
         if l0_chunks:
             with build_root.path_operation("L0 vector materialization"):
                 vector_store.add_code_chunks(
-                    [chunk._asdict() for chunk in l0_chunks], level="l0"
+                    [
+                        {
+                            **chunk._asdict(),
+                            **(
+                                {"project_id": project_ids_by_level["l0"][index]}
+                                if project_ownership_resolver is not None
+                                else {}
+                            ),
+                        }
+                        for index, chunk in enumerate(l0_chunks)
+                    ],
+                    level="l0",
                 )
         if l2_chunks:
             with build_root.path_operation("L2 vector materialization"):
                 vector_store.add_code_chunks(
-                    [chunk._asdict() for chunk in l2_chunks], level="l2"
+                    [
+                        {
+                            **chunk._asdict(),
+                            **(
+                                {"project_id": project_ids_by_level["l2"][index]}
+                                if project_ownership_resolver is not None
+                                else {}
+                            ),
+                        }
+                        for index, chunk in enumerate(l2_chunks)
+                    ],
+                    level="l2",
                 )
         _require_selected_documents(
             vector_store,

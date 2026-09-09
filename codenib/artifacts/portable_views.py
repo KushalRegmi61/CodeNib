@@ -3228,7 +3228,9 @@ def _validate_vector_semantics(
             "portable vector persistence builder schema does not match its "
             "view config"
         )
-    schema_8_selected = type(builder_schema) is int and builder_schema == 8
+    schema_8_selected = (
+        type(builder_schema) is int and builder_schema in {8, 9}
+    )
     if schema_8_selected:
         if config.get("row_mapping") != VECTOR_ROW_MAPPING_CONTRACT:
             raise ValueError(

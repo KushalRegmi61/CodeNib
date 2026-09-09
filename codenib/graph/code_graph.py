@@ -13,13 +13,26 @@ from typing import Dict, List, Optional, Tuple
 import igraph as ig
 
 from .. import compat_pickle
-from ..types import (EDGE_TYPE_CONTAIN, EDGE_TYPE_REFERENCE,
-                     GRAPH_LAYER_REFERENCE, NODE_TYPE_CLASS,
-                     NODE_TYPE_DIRECTORY, NODE_TYPE_FIELD, NODE_TYPE_FILE,
-                     NODE_TYPE_FUNCTION, NODE_TYPE_METHOD, NODE_TYPE_PROJECT,
-                     NODE_TYPE_SYMBOL, NODE_TYPE_WORKSPACE,
-                     edge_types_for_graph_layer, is_symbol_node,
-                     node_has_definition)
+from ..types import (
+    EDGE_TYPE_CONTAIN,
+    EDGE_TYPE_MANIFEST_DEPENDENCY,
+    EDGE_TYPE_REFERENCE,
+    GRAPH_LAYER_REFERENCE,
+    NODE_TYPE_CLASS,
+    NODE_TYPE_DIRECTORY,
+    NODE_TYPE_FIELD,
+    NODE_TYPE_FILE,
+    NODE_TYPE_FUNCTION,
+    NODE_TYPE_METHOD,
+    NODE_TYPE_PROJECT,
+    NODE_TYPE_SYMBOL,
+    NODE_TYPE_WORKSPACE,
+    edge_types_for_graph_layer,
+    is_architecture_node,
+    is_source_node,
+    is_symbol_node,
+    node_has_definition,
+)
 
 # Bump when the persisted graph schema changes (vertex/edge attributes,
 # top-level pickle keys). load_graph() refuses mismatching pickles so stale
@@ -33,11 +46,9 @@ from ..types import (EDGE_TYPE_CONTAIN, EDGE_TYPE_REFERENCE,
 #     selection_line, independently from the symbol scope range.
 # v5: symbol vertices carry optional semantic symbol_kind plus explicit
 #     has_definition provenance; decoders may emit anchored import edges.
-# NOTE: workspace/project node-type constants and in-memory architecture
-#     helpers are intentionally NOT a schema bump — no persisted vertex/edge
-#     attribute or pickle key changes until graph enrichment lands (with C++
-#     decoder parity), so existing graph.pkl caches keep loading.
-_SCHEMA_VERSION = 5
+# v6: persisted workspace/project vertices, project ownership attributes, and
+# architecture containment/manifest-dependency edges.
+_SCHEMA_VERSION = 6
 
 
 def current_graph_schema_version() -> int:
@@ -407,6 +418,105 @@ class CodeGraph:
                     f"{existing_type!r} vertex"
                 )
         return self._add_vertex(name, dict(attributes))
+
+    def add_architecture_edge(self, source_name, target_name, edge_type):
+        """Add one validated, anchor-free workspace/project edge.
+
+        ``_add_edge`` intentionally creates missing vertices for decoder
+        compatibility.  The architecture boundary must not inherit that
+        behavior: a misspelled project id would otherwise create a typeless
+        persisted vertex.
+        """
+
+        source_id = self.name_to_vertex.get(source_name)
+        target_id = self.name_to_vertex.get(target_name)
+        if source_id is None or target_id is None:
+            raise ValueError(
+                "architecture edges require existing source and target vertices"
+            )
+
+        source = self.graph.vs[source_id].attributes()
+        target = self.graph.vs[target_id].attributes()
+        source_type = source.get("type")
+        target_type = target.get("type")
+
+        if edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY:
+            valid = (
+                source_type == NODE_TYPE_PROJECT and target_type == NODE_TYPE_PROJECT
+            )
+        elif edge_type == EDGE_TYPE_CONTAIN:
+            valid = (
+                source_type == NODE_TYPE_WORKSPACE and target_type == NODE_TYPE_PROJECT
+            ) or (source_type == NODE_TYPE_PROJECT and target_type == NODE_TYPE_FILE)
+        else:
+            valid = False
+
+        if not valid:
+            raise ValueError(
+                "invalid architecture edge: "
+                f"{source_type!r} -[{edge_type}]-> {target_type!r}"
+            )
+
+        return self._add_edge(source_name, target_name, edge_type)
+
+    def iter_source_vertices(self):
+        """Yield source vertices in persisted graph order."""
+
+        return (
+            vertex
+            for vertex in self.graph.vs
+            if is_source_node(vertex.attributes().get("type"))
+        )
+
+    def iter_architecture_vertices(self):
+        """Yield workspace/project vertices in persisted graph order."""
+
+        return (
+            vertex
+            for vertex in self.graph.vs
+            if is_architecture_node(vertex.attributes().get("type"))
+        )
+
+    def remove_architecture_overlay(self):
+        """Remove persisted workspace/project data while preserving source data."""
+
+        architecture_ids = [
+            vertex.index
+            for vertex in self.graph.vs
+            if is_architecture_node(vertex.attributes().get("type"))
+        ]
+        if architecture_ids:
+            architecture_id_set = set(architecture_ids)
+            edge_ids = [
+                edge.index
+                for edge in self.graph.es
+                if edge.source in architecture_id_set
+                or edge.target in architecture_id_set
+            ]
+            if edge_ids:
+                self.graph.delete_edges(edge_ids)
+
+            # Delete one at a time in reverse order so each remaining vertex
+            # keeps its original index until it is removed.
+            for vertex_id in sorted(architecture_ids, reverse=True):
+                self.graph.delete_vertices(vertex_id)
+
+        for vertex in self.graph.vs:
+            if is_source_node(vertex.attributes().get("type")):
+                try:
+                    del vertex["project_id"]
+                except KeyError:
+                    pass
+
+        self.name_to_vertex = {
+            vertex["name"]: vertex.index
+            for vertex in self.graph.vs
+            if isinstance(vertex.attributes().get("name"), str)
+        }
+        self.rebuild_file_vertex_index()
+        self.invalidate_caches()
+        self._rebuild_edge_index()
+        self.build_range_indexes()
 
     def file_vertex_id(self, file_path: str):
         """Return the vertex id for a repository file, if present."""

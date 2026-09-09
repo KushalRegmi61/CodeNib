@@ -303,6 +303,7 @@ class ServerContext:
     lsp_provider: Optional[Any] = field(default=None, repr=False)
     lsp_provider_selection: Dict[str, Any] = field(default_factory=dict)
     errors: Dict[str, str] = field(default_factory=dict)
+    workspace_status: Dict[str, Any] = field(default_factory=dict)
     artifact: Optional[Mapping[str, Any]] = None
     source_error: Optional[str] = "source binding has not been verified"
     explore_runtime: Optional[ExploreSessionRuntime] = field(
@@ -878,11 +879,31 @@ class ServerContext:
             return
         try:
             from ..compiler.graph_artifact import load_authenticated_graph_artifact
+            from ..graph.workspace_enrichment import validate_workspace_graph
 
             self.symbol_graph = load_authenticated_graph_artifact(entry)
+            workspace_summary = entry.metadata.get("workspace")
+            if workspace_summary is None:
+                self.workspace_status = {
+                    "status": "unavailable",
+                    "reason": "manifest_missing_workspace_metadata",
+                }
+            else:
+                validate_workspace_graph(self.symbol_graph, workspace_summary)
+                self.workspace_status = {
+                    "status": "available",
+                    **workspace_summary,
+                }
             logger.info("Loaded symbol_graph from %s", entry.path)
         except Exception as exc:
-            self.errors["symbol_graph"] = str(exc)
+            if self.symbol_graph is None:
+                self.errors["symbol_graph"] = str(exc)
+            else:
+                self.errors["workspace"] = str(exc)
+            self.workspace_status = {
+                "status": "error",
+                "reason": str(exc),
+            }
             logger.warning("Failed to load symbol_graph: %s", exc)
 
     def _load_bm25(

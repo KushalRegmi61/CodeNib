@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
+from ..types import EDGE_TYPE_MANIFEST_DEPENDENCY
+
 
 def canonical_relative_path(value: str) -> str:
     """Normalize one repository-relative path without resolving symlinks."""
@@ -162,6 +164,55 @@ class WorkspaceModel:
         }
 
 
+def workspace_topology_payload(
+    workspace_id: str,
+    projects: list[ProjectRecord],
+) -> dict[str, Any]:
+    """Return the source-independent workspace topology contract.
+
+    File ownership is deliberately excluded: it depends on repository source
+    selection and is represented by the persisted graph's architecture digest.
+    """
+
+    project_ids = {project.project_id for project in projects}
+    project_edges = []
+    for project in sorted(projects, key=lambda item: item.project_id):
+        for dependency in sorted(
+            project.dependencies,
+            key=lambda item: (
+                item.target_project_id or "",
+                item.scope,
+                item.resolution,
+            ),
+        ):
+            if dependency.target_project_id not in project_ids:
+                continue
+            project_edges.append(
+                {
+                    "source": project.project_id,
+                    "target": dependency.target_project_id,
+                    "type": EDGE_TYPE_MANIFEST_DEPENDENCY,
+                }
+            )
+
+    return {
+        "workspace_id": workspace_id,
+        "projects": [
+            {
+                "project_id": project.project_id,
+                "project_path": project.project_path,
+                "project_kind": project.project_kind,
+                "synthetic": project.synthetic,
+            }
+            for project in sorted(projects, key=lambda item: item.project_id)
+        ],
+        "project_edges": sorted(
+            project_edges,
+            key=lambda item: (item["source"], item["target"], item["type"]),
+        ),
+    }
+
+
 def digest_json(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -183,4 +234,5 @@ __all__ = [
     "digest_json",
     "normalize_distribution_name",
     "project_id_for_path",
+    "workspace_topology_payload",
 ]

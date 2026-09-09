@@ -300,6 +300,25 @@ class IndexCompiler:
 
         types_to_build = index_types or self._config.index_types
 
+        # One ownership snapshot is shared by graph, sparse, and dense
+        # builders.  The builders remain independently callable for legacy
+        # users, but a compiler generation never performs three scans.
+        workspace_model = None
+        ownership_resolver = None
+        if {"bm25", "vector", "symbol_graph"}.intersection(types_to_build):
+            from ..workspace.resolver import ProjectPathTrie
+            from ..workspace.scanner import scan_workspace
+
+            workspace_model = scan_workspace(
+                repo_path,
+                source_selection=source_selection,
+            )
+            ownership_trie = ProjectPathTrie(workspace_model.projects)
+
+            def ownership_resolver(path: str) -> str | None:
+                project = ownership_trie.lookup(path)
+                return project.project_id if project is not None else None
+
         head_commit = self._get_head_commit(repo_path)
         source = source or fingerprint_repository(
             repo_path,
@@ -374,6 +393,9 @@ class IndexCompiler:
                     )
                 requested_succeeded = False
                 continue
+            if idx_type in {"bm25", "vector"} and ownership_resolver is not None:
+                if hasattr(builder, "project_ownership_resolver"):
+                    builder.project_ownership_resolver = ownership_resolver
 
             previous_entry = (
                 existing.indexes.get(idx_type) if existing is not None else None
@@ -417,8 +439,14 @@ class IndexCompiler:
                     if incremental_from and previous_entry is not None
                     else None
                 ),
+                previous_artifact_metadata=(
+                    copy.deepcopy(previous_entry.metadata)
+                    if incremental_from and previous_entry is not None
+                    else None
+                ),
                 source_selection=source_selection,
                 expected_source_commit=head_commit,
+                workspace_model=workspace_model,
             )
             result = self._validate_build_selection(
                 result,
@@ -645,8 +673,10 @@ class IndexCompiler:
         *,
         last_commit: Optional[str] = None,
         previous_artifact_config: Optional[Dict[str, Any]] = None,
+        previous_artifact_metadata: Optional[Dict[str, Any]] = None,
         source_selection: RepositorySourceSelection,
         expected_source_commit: str,
+        workspace_model: Any = None,
     ) -> BuildResult:
         """Build a single index, catching errors.
 
@@ -667,6 +697,12 @@ class IndexCompiler:
                     update_kwargs["source_commit"] = expected_source_commit
                 if previous_artifact_config is not None:
                     update_kwargs["previous_artifact_config"] = previous_artifact_config
+                if previous_artifact_metadata is not None:
+                    update_kwargs["previous_artifact_metadata"] = (
+                        previous_artifact_metadata
+                    )
+                if index_type == "symbol_graph" and workspace_model is not None:
+                    update_kwargs["workspace_model"] = workspace_model
                 status = builder.incremental_update(
                     scope="current_repo",
                     **update_kwargs,
@@ -679,6 +715,8 @@ class IndexCompiler:
                 }
                 if index_type == "zoekt":
                     build_kwargs["source_commit"] = expected_source_commit
+                if index_type == "symbol_graph" and workspace_model is not None:
+                    build_kwargs["workspace_model"] = workspace_model
                 status = builder.build(scope="current_repo", **build_kwargs)
             if not isinstance(status, IndexStatus) or type(status.metadata) is not dict:
                 raise TypeError("index builder must return an IndexStatus")

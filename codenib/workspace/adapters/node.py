@@ -11,8 +11,12 @@ from typing import Any, Iterable, Sequence
 
 import yaml
 
-from ..models import (DependencyRecord, ManifestRecord, ProjectRecord,
-                      project_id_for_path)
+from ..models import (
+    DependencyRecord,
+    ManifestRecord,
+    ProjectRecord,
+    project_id_for_path,
+)
 from ..resolver import unique_name_index
 from .base import AdapterContext
 
@@ -94,10 +98,8 @@ class NodeWorkspaceAdapter:
                 context.diagnostics.append(str(exc))
                 continue
             project_path = path[: -len("/package.json")] or "."
-            if (
-                project_path == "."
-                or not patterns
-                or _matches_any(project_path, patterns)
+            if project_path == "." or (
+                patterns and _matches_any(project_path, patterns)
             ):
                 yield ManifestRecord(
                     path=path,

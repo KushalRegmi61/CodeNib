@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from codenib.workspace import scan_workspace
+from codenib.workspace.resolver import ProjectPathTrie
 
 
 def _write(path: Path, content: str) -> None:
@@ -117,11 +118,36 @@ def test_scan_python_dependency(tmp_path):
     ]
 
 
+def test_scan_go_work_honors_use_members(tmp_path):
+    _write(tmp_path / "go.work", "go 1.22\n\nuse (\n    ./services/api\n)\n")
+    _write(
+        tmp_path / "services/api/go.mod",
+        "module example.test/api\n\ngo 1.22\n",
+    )
+    _write(tmp_path / "services/ignored/go.mod", "module example.test/ignored\n")
+
+    model = scan_workspace(str(tmp_path))
+
+    assert "go" in model.detected_systems
+    assert {project.project_path for project in model.projects} == {
+        ".",
+        "services/api",
+    }
+
+
 def test_scan_without_manifests_yields_synthetic_root(tmp_path):
     _write(tmp_path / "main.py", "print(1)\n")
     model = scan_workspace(str(tmp_path))
     assert [project.project_id for project in model.projects] == ["project://."]
     assert model.projects[0].synthetic
+
+
+def test_project_path_trie_uses_synthetic_root_for_unknown_paths(tmp_path):
+    _write(tmp_path / "main.py", "print(1)\n")
+    model = scan_workspace(str(tmp_path))
+    trie = ProjectPathTrie(model.projects)
+
+    assert trie.lookup("unknown/path.py") is model.projects[0]
 
 
 def test_scan_adapters_ignore_foreign_manifests(tmp_path):

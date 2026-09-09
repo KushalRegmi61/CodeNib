@@ -77,6 +77,7 @@ _WINDOWS_DRIVE_PREFIX = tuple(
     f"{letter}:" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
 _CURRENT_BM25_BUILDER_SCHEMA = 8
+_SUPPORTED_BM25_BUILDER_SCHEMAS = frozenset({8, 9})
 _STRICT_BM25_PLAN_DOMAIN = b"codenib-portable-bm25-strict-workspace-v1"
 _STRICT_BM25_FILES = frozenset({"documents.json", "bm25_metadata.json"})
 
@@ -1118,7 +1119,7 @@ def _policy(
     has_selection_digest = "source_selection_digest" in view_config
     if (
         type(view_config.get("builder_schema")) is int
-        and view_config.get("builder_schema") == _CURRENT_BM25_BUILDER_SCHEMA
+        and view_config.get("builder_schema") in _SUPPORTED_BM25_BUILDER_SCHEMAS
         and not has_selection_digest
     ):
         raise ValueError("current BM25 view config requires a source selection digest")

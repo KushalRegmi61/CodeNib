@@ -523,6 +523,42 @@ void assert_filter_identity_proof() {
   assert(external_proof.reference_only_count == 1);
   assert(external_proof.query_surface_sha256 == EXTERNAL_FILTER_SURFACE);
 
+  auto architecture = make_filter_proof_records();
+  CodeGraph::VertexData workspace;
+  workspace.name = "workspace://root";
+  workspace.type = codenib::core::NODE_TYPE_WORKSPACE;
+  CodeGraph::VertexData project;
+  project.name = "project://apps/web";
+  project.type = codenib::core::NODE_TYPE_PROJECT;
+  CodeGraph::VertexData library;
+  library.name = "project://libs/shared";
+  library.type = codenib::core::NODE_TYPE_PROJECT;
+  architecture->vertices.push_back(workspace);
+  architecture->vertices.push_back(project);
+  architecture->vertices.push_back(library);
+  architecture->edges.push_back(
+      {5, 6, codenib::core::EDGE_TYPE_CONTAIN, std::nullopt, std::nullopt});
+  architecture->edges.push_back(
+      {6, 2, codenib::core::EDGE_TYPE_CONTAIN, std::nullopt, std::nullopt});
+  architecture->edges.push_back(
+      {6, 7, codenib::core::EDGE_TYPE_MANIFEST_DEPENDENCY, std::nullopt,
+       std::nullopt});
+  const auto architecture_proof = FactQueryIndex(architecture).prove_filter_identity(
+      {"src/main.py"}, BASE_FILTER_SURFACE);
+  assert(architecture_proof.record_count == 8);
+  assert(architecture_proof.architecture_count == 3);
+  assert(architecture_proof.edge_count == 7);
+  assert(architecture_proof.reference_count == 1);
+  assert(architecture_proof.query_surface_sha256 == BASE_FILTER_SURFACE);
+
+  auto anchored_architecture = make_filter_proof_records();
+  anchored_architecture->vertices.push_back(workspace);
+  anchored_architecture->vertices.push_back(project);
+  anchored_architecture->vertices.push_back(library);
+  anchored_architecture->edges.push_back(
+      {5, 6, codenib::core::EDGE_TYPE_CONTAIN, "src/main.py", 12});
+  rejects(anchored_architecture, {"src/main.py"});
+
   auto reference_without_provenance = make_filter_proof_records();
   auto null_reference =
       reference_only("external-target", "vendor/lib.py:external()");

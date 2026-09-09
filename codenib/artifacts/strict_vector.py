@@ -82,7 +82,7 @@ _MAX_CONFIG_JSON_BYTES = 16 * 1024 * 1024
 _JSON_READ_CHUNK_BYTES = 1024 * 1024
 _MAX_SOURCE_PATH_BYTES = 4_096
 _MAX_SOURCE_PATH_COMPONENTS = 256
-_STRICT_VECTOR_BUILDER_SCHEMA = 8
+_STRICT_VECTOR_BUILDER_SCHEMAS = frozenset({8, 9})
 _STRICT_VECTOR_PLAN_DOMAIN = b"codenib-portable-vector-strict-workspace-v1"
 _VECTOR_LEVELS = ("l0", "l2")
 _RAW_MUTABLE_ROOT_FILES = frozenset(
@@ -731,6 +731,7 @@ def _normalized_documents(
     forbidden_paths: tuple[Path, ...],
     environ: Mapping[str, str],
     authenticated_source_files: frozenset[str],
+    project_aware: bool,
     counter: list[int] | None = None,
     check_cancelled: Callable[[], None] | None = None,
 ) -> Iterable[dict[str, Any]]:
@@ -758,6 +759,7 @@ def _normalized_documents(
                 document,
                 row_index=index,
                 level=level,
+                project_aware=project_aware,
             )
             assert_no_secret_fields(
                 metadata,
@@ -796,6 +798,7 @@ def _document_record(
     forbidden_paths: tuple[Path, ...],
     environ: Mapping[str, str],
     authenticated_source_files: frozenset[str],
+    project_aware: bool,
     check_cancelled: Callable[[], None] | None = None,
 ) -> tuple[TreeFileRecord, int]:
     counter = [0]
@@ -809,6 +812,7 @@ def _document_record(
                 forbidden_paths=forbidden_paths,
                 environ=environ,
                 authenticated_source_files=authenticated_source_files,
+                project_aware=project_aware,
                 counter=counter,
                 check_cancelled=check_cancelled,
             )
@@ -909,10 +913,10 @@ def _policy(
 ) -> _VectorPolicy:
     if (
         type(view_config.get("builder_schema")) is not int
-        or view_config.get("builder_schema") != _STRICT_VECTOR_BUILDER_SCHEMA
+        or view_config.get("builder_schema") not in _STRICT_VECTOR_BUILDER_SCHEMAS
     ):
         raise ValueError(
-            "strict vector cache ingress requires builder schema 8; rebuild older "
+            "strict vector cache ingress requires builder schema 8 or 9; rebuild older "
             "compiler caches"
         )
     if not _REQUIRED_IDENTITY_FIELDS <= set(view_config):
@@ -1002,9 +1006,9 @@ def _validate_identity(
         raise ValueError("schema-8 vector root artifact identity differs from manifest")
     if (
         type(artifact.get("builder_schema")) is not int
-        or artifact.get("builder_schema") != _STRICT_VECTOR_BUILDER_SCHEMA
+        or artifact.get("builder_schema") not in _STRICT_VECTOR_BUILDER_SCHEMAS
     ):
-        raise ValueError("schema-8 vector root artifact identity is not schema 8")
+        raise ValueError("schema-8 vector root artifact identity is not schema 8 or 9")
 
 
 def _validate_document_count(
@@ -1129,6 +1133,7 @@ def _derived_vector(
             forbidden_paths=policy.forbidden_paths,
             environ=policy.environment,
             authenticated_source_files=policy.authenticated_source_files,
+            project_aware=policy.view_config.get("builder_schema") == 9,
             check_cancelled=check_cancelled,
         )
         if observed_count != raw_count:

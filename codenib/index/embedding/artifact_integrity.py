@@ -54,6 +54,9 @@ _VECTOR_DOCUMENT_METADATA_FIELDS = frozenset(
         "content_hash",
     }
 )
+_VECTOR_PROJECT_DOCUMENT_METADATA_FIELDS = _VECTOR_DOCUMENT_METADATA_FIELDS | {
+    "project_id"
+}
 _MAX_SOURCE_PATH_BYTES = 4_096
 _MAX_SOURCE_PATH_COMPONENTS = 256
 _MUTABLE_ROOT_FILES = frozenset(
@@ -526,6 +529,7 @@ def validate_schema_8_vector_document_row(
     *,
     row_index: int,
     level: str,
+    project_aware: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Validate the source-independent schema-8 document/row contract."""
 
@@ -546,7 +550,12 @@ def validate_schema_8_vector_document_row(
         raise ValueError(
             f"schema-8 vector {level} document {row_index} has invalid content"
         )
-    if set(metadata) != _VECTOR_DOCUMENT_METADATA_FIELDS:
+    expected_fields = (
+        _VECTOR_PROJECT_DOCUMENT_METADATA_FIELDS
+        if project_aware
+        else _VECTOR_DOCUMENT_METADATA_FIELDS
+    )
+    if set(metadata) != expected_fields:
         raise ValueError(
             f"schema-8 vector {level} document {row_index} metadata has an "
             "invalid shape"
@@ -585,6 +594,18 @@ def validate_schema_8_vector_document_row(
             f"schema-8 vector {level} document {row_index} has an invalid "
             "content hash"
         )
+    if project_aware:
+        project_id = metadata["project_id"]
+        if (
+            not isinstance(project_id, str)
+            or not project_id.startswith("project://")
+            or project_id == "project://"
+            or "\\" in project_id
+            or "\x00" in project_id
+        ):
+            raise ValueError(
+                f"schema-8 vector {level} document {row_index} project_id is invalid"
+            )
     source_file = metadata["file"]
     if not isinstance(source_file, str) or not source_file:
         raise ValueError(

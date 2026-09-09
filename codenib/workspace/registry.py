@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .adapters.bazel import BazelAdapter
 from .adapters.cargo import CargoAdapter
+from .adapters.go import GoAdapter
 from .adapters.heuristic import HeuristicAdapter
 from .adapters.node import NodeWorkspaceAdapter
 from .adapters.python import PythonAdapter
@@ -16,6 +17,7 @@ from .adapters.turbo import TurboAdapter
 DEFAULT_ADAPTERS = (
     BazelAdapter,
     CargoAdapter,
+    GoAdapter,
     NodeWorkspaceAdapter,
     TurboAdapter,
     PythonAdapter,

@@ -105,9 +105,14 @@ bool is_known_symbol_type(const std::string &type) {
          type == NODE_TYPE_FIELD;
 }
 
+bool is_architecture_type(const std::string &type) {
+  return type == NODE_TYPE_WORKSPACE || type == NODE_TYPE_PROJECT;
+}
+
 bool is_known_edge_type(const std::string &type) {
   return type == EDGE_TYPE_CONTAIN || type == EDGE_TYPE_REFERENCE ||
-         type == EDGE_TYPE_IMPORT || type == EDGE_TYPE_TYPE_USE;
+         type == EDGE_TYPE_IMPORT || type == EDGE_TYPE_TYPE_USE ||
+         type == EDGE_TYPE_MANIFEST_DEPENDENCY;
 }
 
 bool bytewise_less(const std::string &left, const std::string &right) {
@@ -380,10 +385,15 @@ FactQueryIndex::FactQueryIndex(std::shared_ptr<const DecodedRecords> records,
       throw std::out_of_range("FactQueryIndex edge endpoint is out of range");
     }
     if (records_->route_adjacency_complete) {
-      outgoing_neighbors_[static_cast<std::size_t>(edge.source)].push_back(
-          edge.target);
-      incoming_neighbors_[static_cast<std::size_t>(edge.target)].push_back(
-          edge.source);
+      const auto &source = records_->vertices[static_cast<std::size_t>(edge.source)];
+      const auto &target = records_->vertices[static_cast<std::size_t>(edge.target)];
+      if (!is_architecture_type(source.type) &&
+          !is_architecture_type(target.type)) {
+        outgoing_neighbors_[static_cast<std::size_t>(edge.source)].push_back(
+            edge.target);
+        incoming_neighbors_[static_cast<std::size_t>(edge.target)].push_back(
+            edge.source);
+      }
     }
     if (edge.type != EDGE_TYPE_REFERENCE)
       continue;
@@ -522,8 +532,10 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
   query_surface_digest.update(QUERY_SURFACE_DOMAIN);
   query_surface_digest.update(&NUL, 1);
   append_u32_be(query_surface_digest, FILTER_IDENTITY_PROOF_SCHEMA_VERSION);
-  append_u64_be(query_surface_digest,
-                static_cast<std::uint64_t>(records_->vertices.size()));
+  const auto source_vertex_count = static_cast<std::uint64_t>(std::count_if(
+      records_->vertices.begin(), records_->vertices.end(),
+      [](const auto &vertex) { return !is_architecture_type(vertex.type); }));
+  append_u64_be(query_surface_digest, source_vertex_count);
 
   std::unordered_set<std::string> allowed_directories;
   allowed_directories.reserve(allowed_files.size());
@@ -541,6 +553,8 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
     file,
     definition,
     reference_only,
+    workspace,
+    project,
   };
   std::vector<ProvenVertex> vertex_kinds;
   vertex_kinds.reserve(records_->vertices.size());
@@ -555,17 +569,20 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
 
   std::size_t root_count = 0;
   for (const auto &vertex : records_->vertices) {
-    constexpr char VERTEX_TAG = 'V';
-    query_surface_digest.update(&VERTEX_TAG, 1);
-    append_present_string(query_surface_digest, vertex.name);
-    append_present_string(query_surface_digest, vertex.type);
-    append_optional_string(query_surface_digest, vertex.file);
-    append_optional_int(query_surface_digest, vertex.start_line);
-    append_optional_int(query_surface_digest, vertex.end_line);
-    append_optional_int(query_surface_digest, vertex.selection_line);
-    append_optional_string(query_surface_digest, vertex.unified_name);
-    append_optional_string(query_surface_digest, vertex.symbol_kind);
-    append_optional_bool(query_surface_digest, vertex.has_definition);
+    const bool architecture_vertex = is_architecture_type(vertex.type);
+    if (!architecture_vertex) {
+      constexpr char VERTEX_TAG = 'V';
+      query_surface_digest.update(&VERTEX_TAG, 1);
+      append_present_string(query_surface_digest, vertex.name);
+      append_present_string(query_surface_digest, vertex.type);
+      append_optional_string(query_surface_digest, vertex.file);
+      append_optional_int(query_surface_digest, vertex.start_line);
+      append_optional_int(query_surface_digest, vertex.end_line);
+      append_optional_int(query_surface_digest, vertex.selection_line);
+      append_optional_string(query_surface_digest, vertex.unified_name);
+      append_optional_string(query_surface_digest, vertex.symbol_kind);
+      append_optional_bool(query_surface_digest, vertex.has_definition);
+    }
     const auto structural_attributes_absent = [&]() {
       return !vertex.file.has_value() && !vertex.start_line.has_value() &&
              !vertex.end_line.has_value() &&
@@ -607,6 +624,22 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
       }
       ++proof.file_count;
       vertex_kinds.push_back(ProvenVertex::file);
+      continue;
+    }
+    if (vertex.type == NODE_TYPE_WORKSPACE || vertex.type == NODE_TYPE_PROJECT) {
+      const bool valid_name =
+          vertex.type == NODE_TYPE_WORKSPACE
+              ? vertex.name.rfind("workspace://", 0) == 0
+              : vertex.name.rfind("project://", 0) == 0;
+      if (!valid_name || !structural_attributes_absent() ||
+          vertex.unified_name.has_value()) {
+        throw std::invalid_argument(
+            "FactQueryIndex filter proof rejected an invalid architecture record");
+      }
+      ++proof.architecture_count;
+      vertex_kinds.push_back(vertex.type == NODE_TYPE_WORKSPACE
+                                 ? ProvenVertex::workspace
+                                 : ProvenVertex::project);
       continue;
     }
     if (!is_known_symbol_type(vertex.type)) {
@@ -656,7 +689,8 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
   }
   if (proof.record_count != root_count + proof.directory_count +
                                 proof.file_count + proof.definition_count +
-                                proof.reference_only_count) {
+                                proof.reference_only_count +
+                                proof.architecture_count) {
     throw std::logic_error(
         "FactQueryIndex filter proof record partition is inconsistent");
   }
@@ -665,8 +699,20 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
         "FactQueryIndex filter proof definition count disagrees with index");
   }
 
+  std::size_t source_edge_count = 0;
+  for (const auto &edge : records_->edges) {
+    if (edge.source >= 0 && edge.target >= 0 &&
+        static_cast<std::size_t>(edge.source) < vertex_kinds.size() &&
+        static_cast<std::size_t>(edge.target) < vertex_kinds.size() &&
+        !is_architecture_type(
+            records_->vertices[static_cast<std::size_t>(edge.source)].type) &&
+        !is_architecture_type(
+            records_->vertices[static_cast<std::size_t>(edge.target)].type)) {
+      ++source_edge_count;
+    }
+  }
   append_u64_be(query_surface_digest,
-                static_cast<std::uint64_t>(records_->edges.size()));
+                static_cast<std::uint64_t>(source_edge_count));
   for (const auto &edge : records_->edges) {
     if (edge.source < 0 || edge.target < 0 ||
         static_cast<std::size_t>(edge.source) >= vertex_kinds.size() ||
@@ -674,6 +720,39 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
       throw std::invalid_argument(
           "FactQueryIndex filter proof rejected an unproven edge endpoint");
     }
+    if (!is_known_edge_type(edge.type)) {
+      throw std::invalid_argument(
+          "FactQueryIndex filter proof rejected an unknown edge type");
+    }
+    const auto source_kind =
+        vertex_kinds[static_cast<std::size_t>(edge.source)];
+    const auto target_kind =
+        vertex_kinds[static_cast<std::size_t>(edge.target)];
+
+    const bool architecture_edge =
+        source_kind == ProvenVertex::workspace ||
+        source_kind == ProvenVertex::project ||
+        target_kind == ProvenVertex::workspace ||
+        target_kind == ProvenVertex::project;
+    if (architecture_edge) {
+      const bool valid_containment =
+          edge.type == EDGE_TYPE_CONTAIN &&
+          ((source_kind == ProvenVertex::workspace &&
+            target_kind == ProvenVertex::project) ||
+           (source_kind == ProvenVertex::project &&
+            target_kind == ProvenVertex::file));
+      const bool valid_manifest_dependency =
+          edge.type == EDGE_TYPE_MANIFEST_DEPENDENCY &&
+          source_kind == ProvenVertex::project &&
+          target_kind == ProvenVertex::project;
+      if ((!valid_containment && !valid_manifest_dependency) ||
+          edge.anchor_file.has_value() || edge.anchor_line.has_value()) {
+        throw std::invalid_argument(
+            "FactQueryIndex filter proof rejected an invalid architecture edge");
+      }
+      continue;
+    }
+
     constexpr char EDGE_TAG = 'E';
     query_surface_digest.update(&EDGE_TAG, 1);
     append_present_i64(query_surface_digest,
@@ -683,14 +762,7 @@ FactQueryIndex::FilterIdentityProof FactQueryIndex::prove_filter_identity(
     append_present_string(query_surface_digest, edge.type);
     append_optional_string(query_surface_digest, edge.anchor_file);
     append_optional_int(query_surface_digest, edge.anchor_line);
-    if (!is_known_edge_type(edge.type)) {
-      throw std::invalid_argument(
-          "FactQueryIndex filter proof rejected an unknown edge type");
-    }
-    const auto source_kind =
-        vertex_kinds[static_cast<std::size_t>(edge.source)];
-    const auto target_kind =
-        vertex_kinds[static_cast<std::size_t>(edge.target)];
+
     if (source_kind == ProvenVertex::reference_only ||
         (target_kind == ProvenVertex::reference_only &&
          edge.type != EDGE_TYPE_REFERENCE)) {

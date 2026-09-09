@@ -8,18 +8,27 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from ..repository_source_selection import (DEFAULT_REPOSITORY_SOURCE_SELECTION,
-                                           RepositorySourceSelection)
+from ..repository_source_selection import (
+    DEFAULT_REPOSITORY_SOURCE_SELECTION,
+    RepositorySourceSelection,
+)
 from .adapters.base import AdapterContext
 from .inventory import build_manifest_inventory, raw_digest
-from .models import (DependencyRecord, ProjectRecord, WorkspaceModel,
-                     WorkspaceScanBudget, digest_json)
+from .models import (
+    DependencyRecord,
+    ProjectRecord,
+    WorkspaceModel,
+    WorkspaceScanBudget,
+    digest_json,
+    workspace_topology_payload,
+)
 from .registry import DEFAULT_ADAPTERS, validate_registry
 from .resolver import merge_projects
 
 _SYSTEM_NAMES = {
     "bazel": "bazel",
     "cargo": "cargo",
+    "go": "go",
     "node-workspace": "node",
     "turbo": "turbo",
     "python-pyproject": "python",
@@ -51,27 +60,6 @@ def _dedupe_dependencies(values: Iterable[DependencyRecord]) -> list[DependencyR
             item.target_project_id or "",
         ),
     )
-
-
-def _topology_payload(projects: list[ProjectRecord]) -> list[dict]:
-    return [
-        {
-            "project_id": project.project_id,
-            "project_path": project.project_path,
-            "manifest_kinds": sorted(project.manifest_kinds),
-            "project_kind": project.project_kind,
-            "dependencies": [
-                {
-                    "target_project_id": dependency.target_project_id,
-                    "scope": dependency.scope,
-                    "resolution": dependency.resolution,
-                }
-                for dependency in project.dependencies
-                if dependency.target_project_id is not None
-            ],
-        }
-        for project in sorted(projects, key=lambda item: item.project_id)
-    ]
 
 
 def scan_workspace(
@@ -158,7 +146,9 @@ def scan_workspace(
         projects=projects,
         diagnostics=sorted(set(diagnostics)),
         complete=inventory_complete and not diagnostics,
-        topology_digest=digest_json(_topology_payload(projects)),
+        topology_digest=digest_json(
+            workspace_topology_payload("workspace://root", projects)
+        ),
         metadata_digest=metadata_digest,
     )
 

@@ -25,13 +25,18 @@ class HeuristicAdapter:
     @classmethod
     def create_projects(cls, records, context):
         known = {item.project_path for item in records}
+        strong_manifest_dirs = {
+            item.path.rsplit("/", 1)[0] if "/" in item.path else "."
+            for item in context.records
+            if getattr(item, "adapter_id", cls.adapter_id) != cls.adapter_id
+        }
         candidates = set()
         for path in context.inventory.file_paths:
             parts = PurePosixPath(path).parts
             if len(parts) >= 2 and parts[0] in _HEURISTIC_ROOTS:
                 candidates.add("/".join(parts[:2]))
         for path in sorted(candidates):
-            if path in known:
+            if path in known or path in strong_manifest_dirs:
                 continue
             yield ProjectRecord(
                 project_id=project_id_for_path(path),

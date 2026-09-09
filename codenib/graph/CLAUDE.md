@@ -1,26 +1,39 @@
 # graph/ — rules
 
 `CodeGraph` (`code_graph.py`) is an [igraph](https://igraph.org)-backed semantic
-graph: directories/files/symbols as vertices, containment + reference as edges.
-`roi_subgraph.py` extracts a region-of-interest subgraph; `traverse_graph.py`
-and `dependency.py` walk it; `graph/incremental/` patches the graph in place
-from LSP edits.
+graph. Source vertices are directories/files/symbols with containment and
+reference edges. Phase 1a also permits a persisted architecture overlay:
+`workspace -> project -> file -> symbol`, with manifest dependency edges.
+`workspace_enrichment.py` owns overlay construction, ownership, digests, and
+validation; it does not create a second graph store. `roi_subgraph.py`,
+`traverse_graph.py`, and `dependency.py` remain source-graph consumers.
 
 ## Conventions
 
 - **Node / edge types are centralized in [`codenib/types.py`](../types.py).**
-  Vertices: `directory`, `file`, `symbol`, `class`, `function`, `method`,
-  `field`. Edges: `contain`, `reference`. Use the `NODE_TYPE_*` / `EDGE_TYPE_*`
-  constants and `is_symbol_node()` — never hard-code the string literals.
+  Source vertices are `directory`, `file`, `symbol`, `class`, `function`,
+  `method`, and `field`; architecture vertices are `workspace` and `project`.
+  Edges include `contain`, `reference`, `import`, `type-use`, and
+  `depends_on_manifest`. Use the `NODE_TYPE_*` / `EDGE_TYPE_*` constants and
+  predicates — never hard-code string literals.
 - **Persisted-graph schema is versioned.** `_SCHEMA_VERSION` in `code_graph.py`
-  guards the pickle: `load_graph()` raises if an on-disk `schema_version`
-  mismatches, so stale caches fail loudly instead of drifting. **Bump
-  `_SCHEMA_VERSION` whenever you change vertex/edge attributes or the top-level
-  pickle keys**, and expect cached `graph.pkl` files to be regenerated.
-- **C++ decoder parity.** `core/` is a C++ backend (libigraph) mirroring
-  `CodeGraph` / `SCIPGraphDecoder`. If you change graph construction or the
-  serialized layout, keep the C++ decoder in sync — divergence is a silent
-  correctness bug, not a build error.
+  is 6. `load_graph()` rejects mismatches, so pre-Phase-1a graph.pkl files
+  must be regenerated. Keep this name distinct from `builder_schema`,
+  `query_surface_schema_version`, and `workspace_enrichment_version`.
+- **Architecture mutation is validated.** Use
+  `CodeGraph.add_architecture_edge()` rather than `_add_edge()` for workspace
+  or project edges. It validates existing endpoints and rejects anchored or
+  unknown architecture edges before `_add_edge()` can mint a typeless vertex.
+  `remove_architecture_overlay()` must rebuild name/file/edge/range indexes.
+- **Native parity is layered.** The native fact query index recognizes
+  architecture records and valid unanchored architecture edges, but excludes
+  them from source symbol/reference/range indexes. Phase 1b FactBatchBuffer v2
+  rows may carry workspace/project attributes; source-only query receipts
+  remain schema 1 and must not change when architecture metadata changes.
+- **Source consumers stay isolated.** Use `SOURCE_DEPENDENCY_EDGE_TYPES` for
+  traversal, dependency, ROI, retrieval, and external source consumers. The
+  manifest dependency edge is architecture data even though it remains in the
+  global dependency-type union.
 
 ## Incremental patching (`graph/incremental/`)
 

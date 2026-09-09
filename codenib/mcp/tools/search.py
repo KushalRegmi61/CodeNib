@@ -24,6 +24,7 @@ from ._validation import (
     bounded_integer,
     bounded_text,
     required_text,
+    optional_project_id,
 )
 
 
@@ -46,6 +47,7 @@ def search_context_impl(
     budget: str = "balanced",
     level: str = "l2",
     filter_test: bool = False,
+    project_id: str | None = None,
 ) -> Dict[str, Any]:
     """Plan and execute ranked retrieval over the available repository views."""
     normalized_query = required_text(
@@ -57,6 +59,7 @@ def search_context_impl(
     normalized_level = (level or "l2").strip().lower()
     if normalized_level not in {"l0", "l2"}:
         raise ValueError("level must be 'l0' or 'l2'.")
+    project_id = optional_project_id(project_id)
 
     from ...model.retrieval_planner import RetrievalCapabilities, RetrievalPlanner
     from ...ops.retrieve import execute_retrieval_stages
@@ -80,22 +83,28 @@ def search_context_impl(
         if stage.engine == "dense":
             if ctx.vector is None:
                 raise RuntimeError("Dense retrieval selected without a vector index.")
-            return ctx.vector.search_with_content(
-                query=active_query,
-                top_k=stage.top_k or plan.retrieval_top_k,
-                level=normalized_level,
-                score_threshold=None,
-            )
+            vector_kwargs = {
+                "query": active_query,
+                "top_k": stage.top_k or plan.retrieval_top_k,
+                "level": normalized_level,
+                "score_threshold": None,
+            }
+            if project_id is not None:
+                vector_kwargs["project_id"] = project_id
+            return ctx.vector.search_with_content(**vector_kwargs)
         if stage.engine == "sparse":
             if ctx.bm25 is None:
                 raise RuntimeError("Sparse retrieval selected without a BM25 index.")
-            return ctx.bm25.search(
-                query=active_query,
-                top_k=stage.top_k or plan.retrieval_top_k,
-                return_code_content=True,
-                wrap_with_ln=False,
-                filter_test=filter_test,
-            )
+            sparse_kwargs = {
+                "query": active_query,
+                "top_k": stage.top_k or plan.retrieval_top_k,
+                "return_code_content": True,
+                "wrap_with_ln": False,
+                "filter_test": filter_test,
+            }
+            if project_id is not None:
+                sparse_kwargs["project_id"] = project_id
+            return ctx.bm25.search(**sparse_kwargs)
         raise RuntimeError(f"Unsupported retrieval engine: {stage.engine!r}.")
 
     candidates = execute_retrieval_stages(
@@ -120,6 +129,23 @@ def search_context_impl(
             repo_path=ctx.manifest.repo_path,
             include_content=True,
         )
+    if project_id is not None:
+        graph_for_filter = getattr(ctx, "symbol_graph", None)
+        filtered_candidates = []
+        for candidate in candidates:
+            candidate_id = getattr(candidate, "node_id", None) or getattr(
+                candidate, "node_name", None
+            )
+            owner = getattr(candidate, "project_id", None)
+            if owner is None and graph_for_filter is not None:
+                vertex_id = graph_for_filter.name_to_vertex.get(candidate_id)
+                if vertex_id is not None:
+                    owner = graph_for_filter.graph.vs[vertex_id].attributes().get(
+                        "project_id"
+                    )
+            if owner == project_id:
+                filtered_candidates.append(candidate)
+        candidates = filtered_candidates
 
     graph_plan = None
     if plan.graph is not None:
@@ -178,6 +204,7 @@ async def search_semantic(
     level: Optional[str] = None,
     score_threshold: Optional[float] = None,
     transform: Optional[str] = None,  # reserved for Phase 3 HyDE/expand
+    project_id: str | None = None,
 ) -> list[dict] | dict[str, str]:
     """Semantic code search using vector embeddings.
 
@@ -202,6 +229,7 @@ async def search_semantic(
     normalized_level = (level or "l2").strip().lower()
     if normalized_level not in {"l0", "l2"}:
         raise ValueError("level must be 'l0' or 'l2'.")
+    project_id = optional_project_id(project_id)
     if score_threshold is not None and (
         isinstance(score_threshold, bool)
         or not isinstance(score_threshold, (int, float))
@@ -213,13 +241,15 @@ async def search_semantic(
             "error": "Vector index not loaded. Re-run indexing with embedding enabled."
         }
 
-    results = await asyncio.to_thread(
-        ctx.vector.search_with_content,
-        query=normalized_query,
-        top_k=top_k,
-        level=normalized_level,
-        score_threshold=score_threshold,
-    )
+    vector_kwargs = {
+        "query": normalized_query,
+        "top_k": top_k,
+        "level": normalized_level,
+        "score_threshold": score_threshold,
+    }
+    if project_id is not None:
+        vector_kwargs["project_id"] = project_id
+    results = await asyncio.to_thread(ctx.vector.search_with_content, **vector_kwargs)
 
     result_dicts = _project_nodes(results, query=normalized_query)
     for node_dict in result_dicts:
@@ -240,6 +270,7 @@ def search_bm25_impl(
     query: str,
     top_k: int = 20,
     filter_test: bool = False,
+    project_id: str | None = None,
 ) -> List[Dict[str, Any]]:
     """Run BM25 keyword search over indexed code symbols.
 
@@ -259,19 +290,23 @@ def search_bm25_impl(
         maximum=MAX_SEARCH_QUERY_CHARS,
     )
     top_k = bounded_integer(top_k, name="top_k", maximum=MAX_TOOL_RESULTS)
+    project_id = optional_project_id(project_id)
     if ctx.bm25 is None:
         raise RuntimeError(
             "BM25 index is not available. "
             + ctx.errors.get("bm25", "No 'bm25' entry in manifest or status != fresh.")
         )
 
-    results: List[NodeInfo] = ctx.bm25.search(
+    sparse_kwargs = dict(
         query=normalized_query,
         top_k=top_k,
         return_code_content=True,
         wrap_with_ln=False,
         filter_test=filter_test,
     )
+    if project_id is not None:
+        sparse_kwargs["project_id"] = project_id
+    results: List[NodeInfo] = ctx.bm25.search(**sparse_kwargs)
     return _project_nodes(results, query=normalized_query)
 
 

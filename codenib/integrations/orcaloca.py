@@ -18,13 +18,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 from ..types import (
-    DEPENDENCY_EDGE_TYPES,
     NODE_TYPE_CLASS,
     NODE_TYPE_FIELD,
     NODE_TYPE_FILE,
     NODE_TYPE_FUNCTION,
     NODE_TYPE_METHOD,
     NODE_TYPE_SYMBOL,
+    SOURCE_DEPENDENCY_EDGE_TYPES,
 )
 from ._orcaloca_python import PythonOutline, PythonSymbol, parse_python_outline
 from ._repository import RepositoryAdapter, RepositoryEntity, RepositoryPathError
@@ -204,7 +204,7 @@ class OrcaLocaSearchProvider:
         for relation in self.repository.adjacent(
             entity,
             direction="downstream",
-            edge_types=DEPENDENCY_EDGE_TYPES,
+            edge_types=SOURCE_DEPENDENCY_EDGE_TYPES,
         ):
             target = relation.target
             if target.canonical_name in seen or not self._is_orcaloca_entity(target):

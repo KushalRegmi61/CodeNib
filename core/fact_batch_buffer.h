@@ -19,8 +19,8 @@ namespace codenib::core {
 // FactBatchBuffer is the stable native/Python wire contract. All integer
 // fields are little-endian. Strings are (offset, length) pairs into ``arena``;
 // FACT_BATCH_BUFFER_NONE marks an absent string/range component.
-constexpr std::uint16_t FACT_BATCH_BUFFER_ABI_VERSION = 1;
-constexpr std::uint16_t FACT_BATCH_SCHEMA_VERSION = 1;
+constexpr std::uint16_t FACT_BATCH_BUFFER_ABI_VERSION = 2;
+constexpr std::uint16_t FACT_BATCH_SCHEMA_VERSION = 2;
 constexpr std::uint32_t FACT_BATCH_BUFFER_NONE = 0xffffffffU;
 
 constexpr std::size_t FACT_BATCH_META_SIZE = 64;
@@ -29,7 +29,7 @@ constexpr std::size_t FACT_SYMBOL_ROW_SIZE = 80;
 constexpr std::size_t FACT_OCCURRENCE_ROW_SIZE = 48;
 constexpr std::size_t FACT_EDGE_ROW_SIZE = 72;
 constexpr std::size_t FACT_DIAGNOSTIC_ROW_SIZE = 40;
-constexpr std::size_t FACT_GRAPH_VERTEX_ROW_SIZE = 56;
+constexpr std::size_t FACT_GRAPH_VERTEX_ROW_SIZE = 104;
 constexpr std::size_t FACT_GRAPH_EDGE_ROW_SIZE = 32;
 
 constexpr std::uint32_t FACT_BUFFER_FLAG_GRAPH_COMPAT = 1U << 0;

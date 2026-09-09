@@ -7,13 +7,22 @@ from __future__ import annotations
 import pytest
 
 from codenib.graph.code_graph import CodeGraph
-from codenib.types import (DEPENDENCY_EDGE_TYPES, EDGE_TYPE_CONTAIN,
-                           EDGE_TYPE_MANIFEST_DEPENDENCY,
-                           GRAPH_LAYER_ARCHITECTURE, NODE_TYPE_DIRECTORY,
-                           NODE_TYPE_FILE, NODE_TYPE_FUNCTION,
-                           NODE_TYPE_PROJECT, NODE_TYPE_WORKSPACE,
-                           edge_types_for_graph_layer, is_architecture_node,
-                           is_source_node)
+from codenib.graph.layers import build_graph_layers
+from codenib.graph.workspace_enrichment import validate_workspace_graph
+from codenib.types import (
+    DEPENDENCY_EDGE_TYPES,
+    EDGE_TYPE_CONTAIN,
+    EDGE_TYPE_MANIFEST_DEPENDENCY,
+    GRAPH_LAYER_ARCHITECTURE,
+    NODE_TYPE_DIRECTORY,
+    NODE_TYPE_FILE,
+    NODE_TYPE_FUNCTION,
+    NODE_TYPE_PROJECT,
+    NODE_TYPE_WORKSPACE,
+    edge_types_for_graph_layer,
+    is_architecture_node,
+    is_source_node,
+)
 
 
 def _arch_attrs(node_type):
@@ -87,6 +96,68 @@ def test_file_vertex_id_populated_by_merge_from():
     assert base.file_vertex_id("b.py") is not None
 
 
+def test_architecture_attributes_and_edges_survive_round_trip(tmp_path):
+    graph = CodeGraph("repo")
+    graph.add_file_node("src/app.py")
+    graph.add_architecture_vertex(
+        "workspace://root",
+        {"type": NODE_TYPE_WORKSPACE, "workspace_id": "workspace://root"},
+    )
+    graph.add_architecture_vertex(
+        "project://apps/web",
+        {
+            "type": NODE_TYPE_PROJECT,
+            "project_id": "project://apps/web",
+            "is_shared": True,
+        },
+    )
+    graph.graph.vs[graph.name_to_vertex["src/app.py"]][
+        "project_id"
+    ] = "project://apps/web"
+    graph.add_architecture_edge(
+        "workspace://root", "project://apps/web", EDGE_TYPE_CONTAIN
+    )
+    graph.add_architecture_edge("project://apps/web", "src/app.py", EDGE_TYPE_CONTAIN)
+
+    path = tmp_path / "graph.pkl"
+    graph.save_graph(path)
+    loaded = CodeGraph.load_graph(path)
+
+    assert (
+        loaded.graph.vs[loaded.name_to_vertex["project://apps/web"]]["is_shared"]
+        is True
+    )
+    validate_workspace_graph(loaded)
+
+
+def test_architecture_edge_rejects_missing_endpoints_before_add():
+    graph = CodeGraph("repo")
+    graph.add_architecture_vertex("workspace://root", {"type": NODE_TYPE_WORKSPACE})
+    with pytest.raises(ValueError, match="existing source and target"):
+        graph.add_architecture_edge(
+            "workspace://root", "project://missing", EDGE_TYPE_CONTAIN
+        )
+
+
+def test_workspace_validation_rejects_anchored_architecture_edges():
+    graph = CodeGraph("repo")
+    graph.add_file_node("src/app.py")
+    graph.add_architecture_vertex("workspace://root", {"type": NODE_TYPE_WORKSPACE})
+    graph.add_architecture_vertex("project://apps/web", {"type": NODE_TYPE_PROJECT})
+    graph.add_architecture_edge(
+        "workspace://root", "project://apps/web", EDGE_TYPE_CONTAIN
+    )
+    graph._add_edge(
+        "project://apps/web",
+        "src/app.py",
+        EDGE_TYPE_CONTAIN,
+        anchor_file="src/app.py",
+        anchor_line=1,
+    )
+    with pytest.raises(ValueError, match="invalid workspace architecture edge"):
+        validate_workspace_graph(graph)
+
+
 def test_architecture_node_predicates():
     assert is_architecture_node(NODE_TYPE_WORKSPACE)
     assert is_architecture_node(NODE_TYPE_PROJECT)
@@ -103,3 +174,26 @@ def test_architecture_and_dependency_layers():
         {EDGE_TYPE_CONTAIN, EDGE_TYPE_MANIFEST_DEPENDENCY}
     )
     assert EDGE_TYPE_MANIFEST_DEPENDENCY in DEPENDENCY_EDGE_TYPES
+
+
+def test_architecture_layer_filters_shared_containment_by_endpoint_type():
+    graph = CodeGraph("repo")
+    graph.add_file_node("src/app.py")
+    graph.add_symbol_node("src/app.py:main", 0, 0, 1, NODE_TYPE_FUNCTION)
+    graph.add_architecture_vertex("workspace://root", {"type": NODE_TYPE_WORKSPACE})
+    graph.add_architecture_vertex(
+        "project://.", {"type": NODE_TYPE_PROJECT, "project_id": "project://."}
+    )
+    graph.add_architecture_edge("workspace://root", "project://.", EDGE_TYPE_CONTAIN)
+    graph.add_architecture_edge("project://.", "src/app.py", EDGE_TYPE_CONTAIN)
+    graph._add_edge("src/app.py", "src/app.py:main", EDGE_TYPE_CONTAIN)
+    graph.add_architecture_edge(
+        "project://.", "project://.", EDGE_TYPE_MANIFEST_DEPENDENCY
+    )
+
+    layer = build_graph_layers(graph, use_core=False).get("architecture")
+    assert len(layer.edge_ids) == 3
+    assert all(
+        ref.source_name.startswith(("workspace://", "project://"))
+        for ref in layer.iter_edges()
+    )

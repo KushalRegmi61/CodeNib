@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validated reader for the native ``FactBatchBuffer v1`` wire format.
+"""Validated reader for the native ``FactBatchBuffer v2`` wire format.
 
 The native extension returns a constant number of byte tables. This module
 validates the complete envelope before exposing either a column-oriented
@@ -45,8 +45,8 @@ from ..facts.model import (
 )
 from ..graph.code_graph import CodeGraph
 
-FACT_BATCH_BUFFER_ABI_VERSION = 1
-FACT_BATCH_SCHEMA_VERSION = 1
+FACT_BATCH_BUFFER_ABI_VERSION = 2
+FACT_BATCH_SCHEMA_VERSION = 2
 FACT_BATCH_BUFFER_NONE = 0xFFFFFFFF
 
 FACT_BATCH_META_SIZE = 64
@@ -55,7 +55,7 @@ FACT_SYMBOL_ROW_SIZE = 80
 FACT_OCCURRENCE_ROW_SIZE = 48
 FACT_EDGE_ROW_SIZE = 72
 FACT_DIAGNOSTIC_ROW_SIZE = 40
-FACT_GRAPH_VERTEX_ROW_SIZE = 56
+FACT_GRAPH_VERTEX_ROW_SIZE = 104
 FACT_GRAPH_EDGE_ROW_SIZE = 32
 
 FACT_BUFFER_FLAG_GRAPH_COMPAT = 1 << 0
@@ -67,7 +67,7 @@ _SYMBOL = struct.Struct("<20I")
 _OCCURRENCE = struct.Struct("<12I")
 _EDGE = struct.Struct("<IBBHd14I")
 _DIAGNOSTIC = struct.Struct("<IBBH8I")
-_GRAPH_VERTEX = struct.Struct("<14I")
+_GRAPH_VERTEX = struct.Struct("<26I")
 _GRAPH_EDGE = struct.Struct("<8I")
 
 _COMPLETENESS = {
@@ -197,12 +197,12 @@ class FactBatchBufferView:
             raise FactBatchBufferError(f"unsupported FactBatchBuffer magic {magic!r}")
         if abi_version != FACT_BATCH_BUFFER_ABI_VERSION:
             raise FactBatchBufferError(
-                f"FactBatchBuffer ABI {abi_version} != expected "
+                f"FactBatchBuffer native contract mismatch: ABI {abi_version} != expected "
                 f"{FACT_BATCH_BUFFER_ABI_VERSION}"
             )
         if schema_version != FACT_BATCH_SCHEMA_VERSION:
             raise FactBatchBufferError(
-                f"FactBatch schema {schema_version} != expected "
+                f"FactBatch native contract mismatch: schema {schema_version} != expected "
                 f"{FACT_BATCH_SCHEMA_VERSION}"
             )
         (
@@ -389,12 +389,22 @@ class FactBatchBufferView:
         names: list[str] = []
         types: list[str] = []
         files: list[str | None] = []
+        project_ids: list[str | None] = []
+        workspace_ids: list[str | None] = []
+        project_paths: list[str | None] = []
+        workspace_paths: list[str | None] = []
+        display_names: list[str | None] = []
+        project_kinds: list[str | None] = []
         start_lines: list[int | None] = []
         end_lines: list[int | None] = []
         selection_lines: list[int | None] = []
         unified_names: list[str | None] = []
         symbol_kinds: list[str | None] = []
         has_definitions: list[bool | None] = []
+        synthetic_flags: list[bool | None] = []
+        ownership_flags: list[bool | None] = []
+        sharing_flags: list[bool | None] = []
+        shared_flags: list[bool | None] = []
 
         for index in range(self.meta.graph_vertex_count):
             row = _GRAPH_VERTEX.unpack_from(
@@ -407,21 +417,64 @@ class FactBatchBufferView:
                 self._string(row[2], row[3], required=True, label="vertex type")
             )
             files.append(self._string(row[4], row[5], label="vertex file"))
+            project_ids.append(self._string(row[6], row[7], label="vertex project_id"))
+            workspace_ids.append(
+                self._string(row[8], row[9], label="vertex workspace_id")
+            )
+            project_paths.append(
+                self._string(row[10], row[11], label="vertex project_path")
+            )
+            workspace_paths.append(
+                self._string(row[12], row[13], label="vertex workspace_path")
+            )
+            display_names.append(
+                self._string(row[14], row[15], label="vertex display_name")
+            )
+            project_kinds.append(
+                self._string(row[16], row[17], label="vertex project_kind")
+            )
             unified_names.append(
-                self._string(row[6], row[7], label="vertex unified_name")
+                self._string(row[18], row[19], label="vertex unified_name")
             )
             symbol_kinds.append(
-                self._string(row[8], row[9], label="vertex symbol_kind")
+                self._string(row[20], row[21], label="vertex symbol_kind")
             )
-            start_lines.append(self._optional_line(row[10]))
-            end_lines.append(self._optional_line(row[11]))
-            selection_lines.append(self._optional_line(row[12]))
-            flags = row[13]
-            if flags & ~0b11:
+            start_lines.append(self._optional_line(row[22]))
+            end_lines.append(self._optional_line(row[23]))
+            selection_lines.append(self._optional_line(row[24]))
+            flags = row[25]
+            if flags & ~0x3FF:
                 raise FactBatchBufferError(
                     f"graph vertex {index} has unsupported flags {flags:#x}"
                 )
-            has_definitions.append(bool(flags & 0b10) if flags & 0b1 else None)
+
+            def optional_flag(shift: int, label: str) -> bool | None:
+                value = (flags >> shift) & 0b11
+                if value == 0:
+                    return None
+                if value == 1:
+                    return False
+                if value == 2:
+                    return True
+                raise FactBatchBufferError(f"graph vertex {index} has invalid {label}")
+
+            has_definitions.append(optional_flag(0, "definition flags"))
+            synthetic_flags.append(optional_flag(2, "synthetic flags"))
+            ownership_flags.append(optional_flag(4, "ownership flags"))
+            sharing_flags.append(optional_flag(6, "sharing flags"))
+            shared_flags.append(optional_flag(8, "shared flags"))
+
+            node_type = types[-1]
+            if node_type == "workspace":
+                if workspace_ids[-1] != names[-1] or workspace_paths[-1] is None:
+                    raise FactBatchBufferError(
+                        f"workspace vertex {index} is missing required attributes"
+                    )
+            elif node_type == "project":
+                if project_ids[-1] != names[-1] or project_paths[-1] is None:
+                    raise FactBatchBufferError(
+                        f"project vertex {index} is missing required attributes"
+                    )
 
         if len(names) != len(set(names)):
             raise FactBatchBufferError(
@@ -438,12 +491,22 @@ class FactBatchBufferView:
                     "name": names,
                     "type": types,
                     "file": files,
+                    "project_id": project_ids,
+                    "workspace_id": workspace_ids,
+                    "project_path": project_paths,
+                    "workspace_path": workspace_paths,
+                    "display_name": display_names,
+                    "project_kind": project_kinds,
                     "start_line": start_lines,
                     "end_line": end_lines,
                     "selection_line": selection_lines,
                     "unified_name": unified_names,
                     "symbol_kind": symbol_kinds,
                     "has_definition": has_definitions,
+                    "synthetic": synthetic_flags,
+                    "ownership_complete": ownership_flags,
+                    "sharing_complete": sharing_flags,
+                    "is_shared": shared_flags,
                 },
             )
         graph.name_to_vertex.update({name: index for index, name in enumerate(names)})
@@ -478,6 +541,29 @@ class FactBatchBufferView:
             )
             anchor_files.append(self._string(row[4], row[5], label="edge anchor_file"))
             anchor_lines.append(self._optional_line(row[6]))
+            edge_type = edge_types[-1]
+            source_type = types[source]
+            target_type = types[target]
+            architecture = source_type in {"workspace", "project"} or target_type in {
+                "workspace",
+                "project",
+            }
+            if architecture:
+                valid = (
+                    edge_type == "contain"
+                    and (
+                        (source_type == "workspace" and target_type == "project")
+                        or (source_type == "project" and target_type == "file")
+                    )
+                ) or (
+                    edge_type == "depends_on_manifest"
+                    and source_type == "project"
+                    and target_type == "project"
+                )
+                if not valid or anchor_files[-1] is not None or anchor_lines[-1] is not None:
+                    raise FactBatchBufferError(
+                        f"graph edge {index} is an invalid architecture edge"
+                    )
         if pairs:
             graph.graph.add_edges(
                 pairs,

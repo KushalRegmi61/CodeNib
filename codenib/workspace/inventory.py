@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..repository_filters import walk_repository_files
-from ..repository_source_selection import (DEFAULT_REPOSITORY_SOURCE_SELECTION,
-                                           RepositorySourceSelection)
+from ..repository_source_selection import (
+    DEFAULT_REPOSITORY_SOURCE_SELECTION,
+    RepositorySourceSelection,
+)
 from .models import WorkspaceScanBudget, canonical_relative_path
 
 
@@ -37,6 +39,8 @@ MANIFEST_NAMES = frozenset(
         "BUILD",
         "BUILD.bazel",
         "Cargo.toml",
+        "go.mod",
+        "go.work",
         "MODULE.bazel",
         "REPO.bazel",
         "WORKSPACE",

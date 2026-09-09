@@ -22,10 +22,13 @@ constexpr const char *NODE_TYPE_CLASS = "class";
 constexpr const char *NODE_TYPE_FUNCTION = "function";
 constexpr const char *NODE_TYPE_METHOD = "method";
 constexpr const char *NODE_TYPE_FIELD = "field";
+constexpr const char *NODE_TYPE_WORKSPACE = "workspace";
+constexpr const char *NODE_TYPE_PROJECT = "project";
 constexpr const char *EDGE_TYPE_CONTAIN = "contain";
 constexpr const char *EDGE_TYPE_REFERENCE = "reference";
 constexpr const char *EDGE_TYPE_IMPORT = "import";
 constexpr const char *EDGE_TYPE_TYPE_USE = "type-use";
+constexpr const char *EDGE_TYPE_MANIFEST_DEPENDENCY = "depends_on_manifest";
 constexpr const char *GRAPH_LAYER_ALL = "all";
 constexpr const char *GRAPH_LAYER_CONTAINMENT = "containment";
 constexpr const char *GRAPH_LAYER_DEPENDENCY = "dependency";
@@ -57,6 +60,16 @@ public:
     // Set only for symbol vertices: true when a definition occurrence was
     // observed, false for reference-only symbols, nullopt for structural nodes.
     std::optional<bool> has_definition;
+    std::optional<std::string> project_id;
+    std::optional<std::string> workspace_id;
+    std::optional<std::string> project_path;
+    std::optional<std::string> workspace_path;
+    std::optional<std::string> display_name;
+    std::optional<std::string> project_kind;
+    std::optional<bool> synthetic;
+    std::optional<bool> ownership_complete;
+    std::optional<bool> sharing_complete;
+    std::optional<bool> is_shared;
   };
 
   struct EdgeData {

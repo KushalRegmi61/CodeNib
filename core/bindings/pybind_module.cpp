@@ -156,6 +156,7 @@ py::dict filter_identity_proof_to_dict(
   result["record_count"] = proof.record_count;
   result["directory_count"] = proof.directory_count;
   result["file_count"] = proof.file_count;
+  result["architecture_count"] = proof.architecture_count;
   result["definition_count"] = proof.definition_count;
   result["reference_only_count"] = proof.reference_only_count;
   result["edge_count"] = proof.edge_count;

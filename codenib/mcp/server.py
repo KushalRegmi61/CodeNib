@@ -59,7 +59,7 @@ from .tools._validation import (
     MAX_SOURCE_PATH_CHARS,
     MAX_TOOL_RESULTS,
 )
-from .tools.dependency import dependency_subgraph_impl
+from .tools.dependency import dependency_subgraph_impl, find_projects_using_impl
 from .tools.explore import explore_context_impl
 from .tools.lsp import lsp_definition_impl, lsp_references_impl, lsp_route_impl
 from .tools.search import search_bm25_impl, search_context_impl, search_regex_impl
@@ -213,6 +213,7 @@ async def explore_context(
     direction: _GraphDirection = "both",
     include_dependencies: bool = True,
     filter_test: bool = False,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """Compose repository context and commit delivery history atomically."""
 
@@ -231,6 +232,7 @@ async def explore_context(
                 direction,
                 include_dependencies,
                 filter_test,
+                project_id or None,
             )
         )
         try:
@@ -266,6 +268,7 @@ async def search_context(
     budget: str = "balanced",
     level: _SearchLevel = "l2",
     filter_test: bool = False,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """Execute capability-aware ranked retrieval over loaded repository views."""
     if _ctx is None:
@@ -278,6 +281,7 @@ async def search_context(
         budget,
         level,
         filter_test,
+        project_id or None,
     )
 
 
@@ -294,6 +298,7 @@ async def semantic_search(
     top_k: _SearchTopK = 10,
     level: _SearchLevel = "l2",
     score_threshold: _FiniteScore = 0.0,
+    project_id: str = "",
 ) -> list[dict[str, Any]] | dict[str, str]:
     """Semantic search over indexed code using vector embeddings.
 
@@ -308,6 +313,7 @@ async def semantic_search(
         top_k=top_k,
         level=level if level else "l2",
         score_threshold=score_threshold if score_threshold > 0 else None,
+        project_id=project_id or None,
     )
 
 
@@ -325,11 +331,14 @@ async def search_bm25(
     query: _SearchQuery,
     top_k: _SearchTopK = 20,
     filter_test: bool = False,
+    project_id: str = "",
 ) -> list[dict[str, Any]]:
     """BM25 keyword search over indexed code symbols."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
-    return await asyncio.to_thread(search_bm25_impl, _ctx, query, top_k, filter_test)
+    return await asyncio.to_thread(
+        search_bm25_impl, _ctx, query, top_k, filter_test, project_id or None
+    )
 
 
 @mcp.tool(
@@ -412,6 +421,7 @@ async def dependency_subgraph(
     depth: _GraphDepth = 2,
     max_nodes: _SearchTopK = 60,
     max_edges: _DependencyEdges = 400,
+    granularity: Literal["symbol", "project"] = "symbol",
 ) -> dict[str, Any]:
     """Call-graph subgraph for *symbol*, bounded by node and edge budgets."""
     if _ctx is None:
@@ -424,6 +434,27 @@ async def dependency_subgraph(
         depth,
         max_nodes,
         max_edges,
+        granularity,
+    )
+
+
+@mcp.tool(
+    name="find_projects_using",
+    description="Find bounded external workspace projects that consume a symbol.",
+)
+async def find_projects_using_tool(
+    symbol: _SearchText,
+    max_projects: Annotated[int, Field(ge=1, le=100)] = 100,
+    max_evidence: Annotated[int, Field(ge=1, le=200)] = 200,
+) -> dict[str, Any]:
+    if _ctx is None:
+        raise RuntimeError("Server not initialized")
+    return await asyncio.to_thread(
+        find_projects_using_impl,
+        _ctx,
+        symbol,
+        max_projects,
+        max_evidence,
     )
 
 
@@ -557,6 +588,25 @@ async def get_manifest() -> dict[str, Any]:
         raise RuntimeError("Server not initialized")
     source_verified = _ctx.verify_source_status()
     result = _ctx.manifest.to_dict()
+    workspace = dict(_ctx.workspace_status)
+    if workspace.get("status") == "available":
+        workspace.setdefault("project_queries", "available")
+        # Python is the correctness path in Phase 1b; the existing native
+        # provider has no digest-verified overlay merge boundary yet.
+        workspace.setdefault("native_project_queries", "unavailable")
+        bm25_available = bool(
+            getattr(_ctx.bm25, "project_filter_available", False)
+        )
+        vector_available = any(
+            _ctx.vector.project_filter_available(level)
+            for level in ("l0", "l2")
+        ) if _ctx.vector is not None else False
+        retrieval_available = bm25_available or vector_available
+        workspace.setdefault(
+            "project_retrieval",
+            "available" if retrieval_available else "unavailable",
+        )
+    result["workspace"] = workspace
     explore_runtime = getattr(_ctx, "explore_runtime", None)
     explore_session = (
         explore_runtime.ledger.stats()

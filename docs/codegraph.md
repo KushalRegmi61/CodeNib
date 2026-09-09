@@ -106,6 +106,34 @@ another directory, device paths, and prefix lookalikes remain rejected.
 
 ## Use it from an agent
 
+### Monorepo workspace overlay
+
+The symbol graph can include a persisted workspace/project architecture overlay
+in the same `graph.pkl` as source files and symbols. A full build scans the
+repository manifests once after language graphs are merged and records:
+
+```text
+workspace -> project -> file -> symbol
+```
+
+Workspace and project vertices use stable `workspace://` and `project://`
+names. Files and symbols receive `project_id`; manifest-resolved internal
+dependencies use `depends_on_manifest` edges. The workspace summary, topology
+digest, metadata digest, and final architecture digest are persisted in the
+symbol-graph metadata and exposed by `get_manifest`.
+
+Source selection is applied after ownership and manifest enrichment. Project
+vertices and workspace-to-project edges are retained when a project has no
+selected files, while dangling project-to-file edges are pruned. Synthetic-root
+ownership remains queryable as `project://.` but is reported as unowned.
+
+Phase 1a keeps existing source queries stable: source traversal, ROI, and
+dependency consumers use source dependency edge types and ignore architecture
+endpoints. Native query/index code tolerates the workspace/project records and
+unanchored architecture edges but does not frame project attributes or expose
+project-level query APIs yet. Those native attributes and project queries are
+deferred to Phase 1b.
+
 Start broad questions with `explore_context`. It composes ranked retrieval,
 symbol routing, dependency expansion, and verified source windows under one
 response budget:

@@ -31,6 +31,7 @@ def dependency_subgraph_impl(
     depth: int = 2,
     max_nodes: int = 60,
     max_edges: int = 400,
+    granularity: str = "symbol",
 ) -> Dict[str, Any]:
     """Return ``DependencyAnalyzer`` output as a JSON dict.
 
@@ -52,6 +53,9 @@ def dependency_subgraph_impl(
         maximum=MAX_DEPENDENCY_EDGES,
     )
     direction = (direction or "").strip().lower()
+    granularity = (granularity or "").strip().lower()
+    if granularity not in {"symbol", "project"}:
+        raise ValueError("granularity must be 'symbol' or 'project'.")
     if direction in {"impact", "callers"}:
         operation = "impact"
     elif direction in {"dependencies", "dependency", "callees"}:
@@ -64,6 +68,18 @@ def dependency_subgraph_impl(
     graph = getattr(ctx, "symbol_graph", None)
     if graph is None:
         return {"error": "symbol_graph index not available"}
+
+    if granularity == "project":
+        from ...graph.project_queries import project_dependency_subgraph
+
+        return project_dependency_subgraph(
+            graph,
+            symbol,
+            direction=direction,
+            depth=depth,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+        )
 
     from ...graph.dependency import DependencyAnalyzer
 
@@ -95,3 +111,26 @@ def dependency_subgraph_impl(
         if isinstance(line, int) and not isinstance(line, bool):
             node["line"] = line + AGENT_LINE_OFFSET
     return payload
+
+
+def find_projects_using_impl(
+    ctx: Any,
+    symbol: str,
+    max_projects: int = 100,
+    max_evidence: int = 200,
+) -> Dict[str, Any]:
+    """Return bounded external project consumers of a symbol."""
+    symbol = required_text(symbol, name="symbol")
+    max_projects = bounded_integer(max_projects, name="max_projects", maximum=100)
+    max_evidence = bounded_integer(max_evidence, name="max_evidence", maximum=200)
+    graph = getattr(ctx, "symbol_graph", None)
+    if graph is None:
+        return {"error": "symbol_graph index not available"}
+    from ...graph.project_queries import find_projects_using
+
+    return find_projects_using(
+        graph,
+        symbol,
+        max_projects=max_projects,
+        max_evidence=max_evidence,
+    )

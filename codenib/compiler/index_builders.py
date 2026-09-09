@@ -114,6 +114,7 @@ def _constrain_and_save_selected_graph(
     graph: Any,
     output_dir: str,
     source_selection: RepositorySourceSelection,
+    post_selection_hook: Optional[Callable[[Any], None]] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Apply the central graph gate, then publish graph and occurrence views."""
 
@@ -126,6 +127,9 @@ def _constrain_and_save_selected_graph(
         raise RuntimeError(
             "source-selection graph gate could not prove a clean artifact"
         )
+
+    if post_selection_hook is not None:
+        post_selection_hook(graph)
 
     graph.save_graph(os.path.join(output_dir, "graph.pkl"))
     occurrence_index = getattr(graph, "lsp_occurrence_index", None)
@@ -247,6 +251,32 @@ def _git_output(repo_path: str, *args: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _workspace_manifest_delta(
+    repo_path: str,
+    earlier_commit: str,
+    later_commit: str,
+) -> bool:
+    """Cheaply detect manifest paths without walking the repository."""
+
+    from ..workspace.inventory import MANIFEST_NAMES
+
+    if not earlier_commit or not later_commit or earlier_commit == later_commit:
+        return False
+    output = _git_output(
+        repo_path,
+        "diff",
+        "--name-status",
+        earlier_commit,
+        later_commit,
+    )
+    for line in output.splitlines():
+        fields = line.split("\t")
+        for path in fields[1:]:
+            if os.path.basename(path) in MANIFEST_NAMES:
+                return True
+    return False
+
+
 @runtime_checkable
 class IndexBuilder(Protocol):
     """Protocol for index build tools the compiler can invoke."""
@@ -300,6 +330,9 @@ class BM25IndexBuilder:
     source_selection: RepositorySourceSelection = field(
         default_factory=RepositorySourceSelection
     )
+    project_ownership_resolver: Optional[Callable[[str], str | None]] = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.source_selection = _snapshot_source_selection(self.source_selection)
@@ -314,7 +347,7 @@ class BM25IndexBuilder:
     ) -> Dict[str, Any]:
         identity = {
             # v8 refuses skipped files and retains non-symbol source context.
-            "builder_schema": 8,
+            "builder_schema": 9 if self.project_ownership_resolver else 8,
             "languages": list(self.languages),
             "max_k": self.max_k,
             "max_lines_per_chunk": self.max_lines_per_chunk,
@@ -581,6 +614,7 @@ class BM25IndexBuilder:
                 chunks=chunks,
                 max_k=self.max_k,
                 project_root=repo_path,
+                project_ownership_resolver=self.project_ownership_resolver,
                 prepare_only=True,
                 check_cancelled=check_cancelled,
             )
@@ -589,6 +623,7 @@ class BM25IndexBuilder:
                 chunks=chunks,
                 max_k=self.max_k,
                 project_root=repo_path,
+                project_ownership_resolver=self.project_ownership_resolver,
             )
         )
         _require_selected_documents(
@@ -696,6 +731,9 @@ class VectorIndexBuilder:
     source_selection: RepositorySourceSelection = field(
         default_factory=RepositorySourceSelection
     )
+    project_ownership_resolver: Optional[Callable[[str], str | None]] = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.source_selection = _snapshot_source_selection(self.source_selection)
@@ -716,7 +754,7 @@ class VectorIndexBuilder:
             # index.  Strict cache ingress can therefore authenticate and
             # publish a portable generation without deserializing pickle or
             # asking FAISS to parse attacker-controlled bytes.
-            "builder_schema": 8,
+            "builder_schema": 9 if self.project_ownership_resolver else 8,
             "embedding_model": route.model,
             "embedding_provider": route.provider,
             "embedding_dimension": self.embedding_dimension,
@@ -959,6 +997,7 @@ class VectorIndexBuilder:
                 strict_chunking=True,
                 additional_ignore_dirs=self.additional_ignore_dirs,
                 source_selection=source_selection,
+                project_ownership_resolver=self.project_ownership_resolver,
                 # ``build`` owns the complete private generation tree.  Its
                 # outer OwnedDirectoryStage is the publication boundary.
                 _atomic_publish=False,
@@ -2095,7 +2134,10 @@ class SymbolGraphBuilder:
         output_dir: str = kwargs["output_dir"]
 
         from ..ls_router import build_graph_for_languages_with_report
-        from ..scip_interface.query_surface import query_surface_sha256
+        from ..scip_interface.query_surface import (
+            query_surface_sha256,
+            source_query_surface_sha256,
+        )
         from .artifact_fingerprints import (
             graph_output_artifact_fingerprint,
             regular_file_fingerprint,
@@ -2213,6 +2255,20 @@ class SymbolGraphBuilder:
                 "compiler_edges": compiler_edge_count,
                 **coverage_report,
             }
+
+        from ..graph.workspace_enrichment import (
+            enrich_graph_with_workspace,
+            finalize_workspace_result,
+            prune_orphaned_architecture,
+            validate_workspace_graph,
+        )
+
+        workspace_result = enrich_graph_with_workspace(
+            graph,
+            repo_path,
+            source_selection=source_selection,
+            workspace_model=kwargs.get("workspace_model"),
+        )
         (
             source_selection_report,
             lsp_occurrence_artifact,
@@ -2220,12 +2276,18 @@ class SymbolGraphBuilder:
             graph,
             output_dir,
             source_selection,
+            post_selection_hook=lambda selected_graph: prune_orphaned_architecture(
+                selected_graph, workspace_result.model
+            ),
         )
+        workspace_result = finalize_workspace_result(graph, workspace_result)
+        validate_workspace_graph(graph, workspace_result.workspace_summary)
+
         graph_output_path = os.path.join(output_dir, "graph.pkl")
         graph_output_receipt = {
             "path": os.path.realpath(graph_output_path),
             **regular_file_fingerprint(graph_output_path),
-            "query_surface_sha256": query_surface_sha256(graph),
+            "query_surface_sha256": source_query_surface_sha256(graph),
         }
 
         node_count = len(graph.graph.vs)
@@ -2248,7 +2310,7 @@ class SymbolGraphBuilder:
             receipt=graph_output_receipt,
         )
         writer_query_surface = graph_artifact_receipt.pop("query_surface_sha256")
-        observed_query_surface = query_surface_sha256(graph)
+        observed_query_surface = source_query_surface_sha256(graph)
         if writer_query_surface != observed_query_surface:
             raise ValueError(
                 "symbol graph query surface changed after its writer returned"
@@ -2274,6 +2336,12 @@ class SymbolGraphBuilder:
                 "graph_artifact": graph_artifact,
                 "lsp_occurrence_artifact": lsp_occurrence_artifact,
                 "query_surface_sha256": observed_query_surface,
+                "workspace": workspace_result.workspace_summary,
+                "graph_schema_version": 6,
+                "workspace_enrichment_version": 1,
+                "topology_digest": workspace_result.topology_digest,
+                "metadata_digest": workspace_result.metadata_digest,
+                "architecture_digest": workspace_result.architecture_digest,
                 "update_mode": "full_rebuild",
                 "partial_index": bool(compiler_partial_languages),
                 "failed_languages": result.failed_languages,
@@ -2310,6 +2378,11 @@ class SymbolGraphBuilder:
         previous_artifact = kwargs.get("previous_artifact_config")
         if previous_artifact is not None and not isinstance(previous_artifact, dict):
             raise ValueError("previous graph artifact config must be a mapping")
+        previous_workspace_metadata = kwargs.get("previous_artifact_metadata")
+        if previous_workspace_metadata is not None and not isinstance(
+            previous_workspace_metadata, dict
+        ):
+            raise ValueError("previous graph artifact metadata must be a mapping")
         selection_changed = (
             previous_artifact is None and bool(source_selection.exclude_subtrees)
         ) or (
@@ -2340,6 +2413,7 @@ class SymbolGraphBuilder:
                 output_dir,
                 last_commit,
                 source_selection=source_selection,
+                previous_workspace_metadata=previous_workspace_metadata,
             )
         except Exception as exc:  # noqa: BLE001 - any patch failure means rebuild
             logger.warning("symbol_graph: patch failed (%s); rebuilding", exc)
@@ -2391,6 +2465,7 @@ class SymbolGraphBuilder:
         last_commit: str,
         *,
         source_selection: Optional[RepositorySourceSelection] = None,
+        previous_workspace_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[IndexStatus]:
         """Run the LSP patcher over every configured language. None = rebuild."""
         from ..graph.code_graph import CodeGraph
@@ -2416,6 +2491,34 @@ class SymbolGraphBuilder:
         )
         graph_languages = self.languages or [self.language]
         head = _git_output(repo_path, "rev-parse", "HEAD")
+
+        from ..graph.workspace_enrichment import (
+            enrich_graph_with_workspace,
+            finalize_workspace_result,
+            prune_orphaned_architecture,
+            validate_workspace_graph,
+            workspace_model_from_graph,
+        )
+        from ..workspace.scanner import scan_workspace
+
+        previous_summary = (previous_workspace_metadata or {}).get("workspace")
+        if previous_summary is not None and not isinstance(previous_summary, dict):
+            return None
+        manifest_changed = _workspace_manifest_delta(repo_path, last_commit, head)
+        workspace_model = None
+        workspace_only_update = False
+        if manifest_changed:
+            workspace_model = scan_workspace(
+                repo_path,
+                source_selection=selected,
+            )
+            if not isinstance(previous_summary, dict):
+                return None
+            if workspace_model.topology_digest != previous_summary.get(
+                "topology_digest"
+            ):
+                return None
+            workspace_only_update = True
 
         started: List[Any] = []
         changed_total = 0
@@ -2470,7 +2573,10 @@ class SymbolGraphBuilder:
                     logger.warning("symbol_graph: stop_lsp: %s", exc)
 
         if changed_total == 0:
-            logger.info("symbol_graph: no source changes for configured languages")
+            logger.info(
+                "symbol_graph: no source changes for configured languages%s",
+                "; workspace metadata changed" if workspace_only_update else "",
+            )
             result = VerificationResult(
                 verified=True,
                 checked=True,
@@ -2496,6 +2602,22 @@ class SymbolGraphBuilder:
             )
             return None
 
+        workspace_result = None
+        legacy_noop = (
+            changed_total == 0 and not manifest_changed and previous_summary is None
+        )
+        if not legacy_noop:
+            if workspace_model is None:
+                if not isinstance(previous_summary, dict):
+                    return None
+                workspace_model = workspace_model_from_graph(graph, previous_summary)
+            workspace_result = enrich_graph_with_workspace(
+                graph,
+                repo_path,
+                source_selection=selected,
+                workspace_model=workspace_model,
+            )
+
         (
             source_selection_report,
             lsp_occurrence_artifact,
@@ -2503,7 +2625,19 @@ class SymbolGraphBuilder:
             graph,
             output_dir,
             selected,
+            post_selection_hook=(
+                (
+                    lambda selected_graph: prune_orphaned_architecture(
+                        selected_graph, workspace_result.model
+                    )
+                )
+                if workspace_result is not None
+                else None
+            ),
         )
+        if workspace_result is not None:
+            workspace_result = finalize_workspace_result(graph, workspace_result)
+            validate_workspace_graph(graph, workspace_result.workspace_summary)
         elapsed = time.monotonic() - start
         node_count = len(graph.graph.vs)
         return IndexStatus(
@@ -2525,6 +2659,18 @@ class SymbolGraphBuilder:
                 "patch_stats": per_language,
                 "source_selection_report": source_selection_report,
                 "lsp_occurrence_artifact": lsp_occurrence_artifact,
+                **(
+                    {
+                        "workspace": workspace_result.workspace_summary,
+                        "graph_schema_version": 6,
+                        "workspace_enrichment_version": 1,
+                        "topology_digest": workspace_result.topology_digest,
+                        "metadata_digest": workspace_result.metadata_digest,
+                        "architecture_digest": workspace_result.architecture_digest,
+                    }
+                    if workspace_result is not None
+                    else {}
+                ),
                 **result.to_metadata(),
             },
         )

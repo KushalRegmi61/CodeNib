@@ -530,7 +530,7 @@ def _validate_schema_8_native_generation_reader(
     if (
         not isinstance(persisted_identity, dict)
         or type(persisted_identity.get("builder_schema")) is not int
-        or persisted_identity.get("builder_schema") != 8
+        or persisted_identity.get("builder_schema") not in {8, 9}
         or persisted_identity != dict(artifact_identity)
     ):
         raise ValueError("schema-8 vector generation artifact identity is invalid")
@@ -617,6 +617,7 @@ def _validate_schema_8_native_generation_reader(
                         document,
                         row_index=document_count,
                         level=level,
+                        project_aware=artifact_identity.get("builder_schema") == 9,
                     )
                     document_count += 1
                     yield document
@@ -1397,6 +1398,7 @@ class CodeVectorStore:
         index: faiss.Index,
         documents: List[_Document],
         top_k: int,
+        allowed_indices: Set[int] | None = None,
     ) -> List[tuple[_Document, float]]:
         """Encode *query* and search a raw FAISS index.
 
@@ -1407,17 +1409,54 @@ class CodeVectorStore:
 
         query_vec = self._embed_query(query).reshape(1, -1)
 
-        # FAISS search
-        k = min(top_k, index.ntotal)
-        distances, indices = index.search(query_vec, k)
+        if allowed_indices is None:
+            # Preserve the native FAISS ordering for unrestricted searches.
+            k = min(top_k, index.ntotal)
+            distances, indices = index.search(query_vec, k)
+            return [
+                (documents[idx], float(dist))
+                for dist, idx in zip(distances[0], indices[0], strict=True)
+                if 0 <= idx < len(documents)
+            ]
 
-        results: List[tuple[_Document, float]] = []
-        for dist, idx in zip(distances[0], indices[0], strict=True):
-            if idx < 0:
-                continue  # FAISS sentinel for empty slots
-            if idx < len(documents):
-                results.append((documents[idx], float(dist)))
-        return results
+        # Restrict the candidate rows before ranking.  This intentionally
+        # reconstructs only the selected vectors, so a project cannot lose its
+        # result budget to higher-scoring rows from another project.
+        candidates = sorted(
+            idx for idx in allowed_indices if 0 <= idx < len(documents)
+        )
+        scored: list[tuple[float, int]] = []
+        query_vector = query_vec[0]
+        for idx in candidates:
+            vector = index.reconstruct(idx)
+            if self.index_metric == "ip":
+                score = float(np.dot(query_vector, vector))
+            else:
+                score = float(np.sum((query_vector - vector) ** 2))
+            scored.append((score, idx))
+        scored.sort(key=lambda item: (-item[0], item[1]) if self.index_metric == "ip" else (item[0], item[1]))
+        return [(documents[idx], score) for score, idx in scored[:top_k]]
+
+    def project_filter_available(self, level: Level = "l2") -> bool:
+        """Whether every document in a level carries schema-9 ownership."""
+        documents = self._get_index_and_docs(level)[1]
+        return bool(documents) and all(
+            isinstance(doc.metadata.get("project_id"), str)
+            and doc.metadata["project_id"].startswith("project://")
+            for doc in documents
+        )
+
+    def _project_indices(self, level: Level, project_id: str) -> Set[int]:
+        if not self.project_filter_available(level):
+            raise RuntimeError(
+                "vector project filtering is unavailable: this artifact was built "
+                "without project metadata; rebuild with artifact schema 9"
+            )
+        return {
+            index
+            for index, document in enumerate(self._get_index_and_docs(level)[1])
+            if document.metadata.get("project_id") == project_id
+        }
 
     def swap_index(
         self,
@@ -1586,6 +1625,7 @@ class CodeVectorStore:
         score_threshold: Optional[float] = None,
         level: Level = "l2",
         mask_node_ids: Optional[Set[str]] = None,
+        project_id: str | None = None,
     ) -> List[NodeInfo]:
         """
         Search for similar code chunks using semantic similarity.
@@ -1609,7 +1649,13 @@ class CodeVectorStore:
 
         logger.debug(f"Searching {level} for: {query[:100]}...")
 
-        docs_with_scores = self._search_index(query, index, documents, top_k)
+        docs_with_scores = self._search_index(
+            query,
+            index,
+            documents,
+            top_k,
+            allowed_indices=(self._project_indices(level, project_id) if project_id else None),
+        )
 
         results = []
         for doc, score in docs_with_scores:
@@ -1628,6 +1674,7 @@ class CodeVectorStore:
                 start_line=metadata.get("start_line", 0),
                 end_line=metadata.get("end_line", 0),
                 score=float(score),
+                project_id=project_id,
             )
             results.append(node_with_score)
 
@@ -1648,6 +1695,7 @@ class CodeVectorStore:
         score_threshold: Optional[float] = None,
         level: Level = "l2",
         mask_node_ids: Optional[Set[str]] = None,
+        project_id: str | None = None,
     ) -> List[NodeInfo]:
         """
         Search and return results with content included.
@@ -1669,7 +1717,13 @@ class CodeVectorStore:
             logger.warning(f"No {level} vector store available. Add code chunks first.")
             return []
 
-        docs_with_scores = self._search_index(query, index, documents, top_k)
+        docs_with_scores = self._search_index(
+            query,
+            index,
+            documents,
+            top_k,
+            allowed_indices=(self._project_indices(level, project_id) if project_id else None),
+        )
 
         results = []
         for doc, score in docs_with_scores:
@@ -1689,6 +1743,7 @@ class CodeVectorStore:
                 end_line=metadata.get("end_line", 0),
                 score=float(score),
                 content=doc.page_content,
+                project_id=project_id,
             )
             results.append(node_with_content)
 
@@ -1926,7 +1981,7 @@ class CodeVectorStore:
                 config["artifact"] = self.artifact_metadata
             if (
                 type(self.artifact_metadata.get("builder_schema")) is int
-                and self.artifact_metadata.get("builder_schema") == 8
+                and self.artifact_metadata.get("builder_schema") in {8, 9}
             ):
                 config["row_mapping"] = VECTOR_ROW_MAPPING_CONTRACT
             # This config is the commit record for both levels. Publishing it
@@ -1975,7 +2030,7 @@ class CodeVectorStore:
 
         if (
             type(self.artifact_metadata.get("builder_schema")) is int
-            and self.artifact_metadata.get("builder_schema") == 8
+            and self.artifact_metadata.get("builder_schema") in {8, 9}
         ):
             # Commit the ordered row-to-document mapping as canonical, inert
             # JSON.  Its array position is the FAISS row receipt.
@@ -2245,9 +2300,9 @@ class CodeVectorStore:
                 )
             schema_8_selected = (
                 type(expected_builder_schema) is int
-                and expected_builder_schema == 8
+                and expected_builder_schema in {8, 9}
                 and type(saved_builder_schema) is int
-                and saved_builder_schema == 8
+                and saved_builder_schema in {8, 9}
             )
             if schema_8_selected and config.get("row_mapping") != (
                 VECTOR_ROW_MAPPING_CONTRACT

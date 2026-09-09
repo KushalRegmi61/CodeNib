@@ -402,6 +402,24 @@ class BM25Retriever:
             )
         )
 
+    def invoke_filtered(
+        self,
+        query: str,
+        candidate_positions: Iterable[int],
+        *,
+        n: int,
+    ) -> List[Document]:
+        """Rank only candidate rows, before applying the result budget."""
+        if self._index is None or n <= 0:
+            return []
+        positions = sorted({int(position) for position in candidate_positions})
+        scores = self._index.get_scores(query.split())
+        ranked = sorted(
+            ((float(scores[position]), position) for position in positions),
+            key=lambda item: (-item[0], item[1]),
+        )
+        return [self.documents[position] for _, position in ranked[:n]]
+
 
 def _dump_json_interruptibly(
     value: object,
@@ -479,6 +497,7 @@ class BM25CodeIndexer:
         language: str = "english",
         project_root: Optional[str] = None,
         *,
+        project_ownership_resolver: Callable[[str], str | None] | None = None,
         prepare_only: bool = False,
         check_cancelled: Callable[[], None] | None = None,
     ):
@@ -525,6 +544,8 @@ class BM25CodeIndexer:
         self.source_mode = SOURCE_MODE_LEGACY_DIRECT
         self._source_binding: RepositorySourceBinding | None = None
         self.nodes: List[str] = []
+        self.project_filter_available = False
+        self.project_ownership_resolver = project_ownership_resolver
 
         # Build the index immediately if a code_graph is provided
         if code_graph is not None:
@@ -558,6 +579,7 @@ class BM25CodeIndexer:
         self._source_binding = None
         self._documents_prepared = False
         self.retriever = None
+        self.project_filter_available = False
 
         # Convert graph nodes to documents
         for vertex in code_graph.graph.vs:
@@ -571,6 +593,11 @@ class BM25CodeIndexer:
         # Create BM25Retriever with LangChain format
         self.retriever = BM25Retriever.from_documents(self.documents, k=self.max_k)
         self._documents_prepared = True
+        self.project_filter_available = bool(self.documents) and all(
+            isinstance(document.metadata.get("project_id"), str)
+            and document.metadata["project_id"].startswith("project://")
+            for document in self.documents
+        )
 
         return self.retriever
 
@@ -617,6 +644,7 @@ class BM25CodeIndexer:
         self._source_binding = None
         self._documents_prepared = False
         self.retriever = None
+        self.project_filter_available = False
 
         # Keep each bounded source span independently searchable. Overloads and
         # split large definitions can share a node_id, but merging them widens
@@ -668,6 +696,11 @@ class BM25CodeIndexer:
                 "end_line": int(chunk.end_line),
             }
         )
+        resolver = getattr(self, "project_ownership_resolver", None)
+        if resolver is not None:
+            project_id = resolver(getattr(chunk, "file", ""))
+            if project_id is not None:
+                doc.metadata["project_id"] = project_id
         # Sparse retrieval must search implementation text, not only the
         # ``file:symbol`` identity. Keep the identity in-band so exact symbol
         # queries remain strong while natural-language questions can match
@@ -741,6 +774,8 @@ class BM25CodeIndexer:
         """
         node_id = vertex.index
         node_type = vertex["type"] if "type" in vertex.attributes() else "unknown"
+        if node_type in {"workspace", "project"}:
+            return None
         node_name = vertex["name"]
 
         metadata = {
@@ -815,6 +850,23 @@ class BM25CodeIndexer:
         metadata["doc_id"] = doc_id
         return Document(page_content=content, metadata=metadata)
 
+    def set_project_ownership_resolver(self, resolver: Callable[[str], str | None]) -> None:
+        if not callable(resolver):
+            raise TypeError("project ownership resolver must be callable")
+        self.project_ownership_resolver = resolver
+
+    def _project_positions(self, project_id: str) -> list[int]:
+        if not self.project_filter_available:
+            raise RuntimeError(
+                "BM25 project filtering is unavailable: this artifact was built "
+                "without project metadata; rebuild with artifact schema 9"
+            )
+        return [
+            position
+            for position, document in enumerate(self.documents)
+            if document.metadata.get("project_id") == project_id
+        ]
+
     def _apply_stemming(self, text: str) -> str:
         """
         Apply custom text processing for code-specific tokenization.
@@ -859,6 +911,7 @@ class BM25CodeIndexer:
         return_code_content: bool = False,
         wrap_with_ln: bool = True,
         filter_test: bool = False,
+        project_id: str | None = None,
     ) -> List[NodeInfo]:
         if self.source_mode == SOURCE_MODE_BOUND_REPOSITORY:
             if self._source_binding is None:  # pragma: no cover - invariant
@@ -870,6 +923,7 @@ class BM25CodeIndexer:
                     return_code_content=return_code_content,
                     wrap_with_ln=wrap_with_ln,
                     filter_test=filter_test,
+                    project_id=project_id,
                 )
         return self._search(
             query,
@@ -877,6 +931,7 @@ class BM25CodeIndexer:
             return_code_content=return_code_content,
             wrap_with_ln=wrap_with_ln,
             filter_test=filter_test,
+            project_id=project_id,
         )
 
     def _search(
@@ -886,6 +941,7 @@ class BM25CodeIndexer:
         return_code_content: bool = False,
         wrap_with_ln: bool = True,
         filter_test: bool = False,
+        project_id: str | None = None,
     ) -> List[NodeInfo]:
         """
         Search the index for nodes matching the query.
@@ -914,7 +970,15 @@ class BM25CodeIndexer:
         logger.debug(f"BM25 search with k={top_k}, num_documents={len(self.documents)}")
 
         # Retrieve results and truncate to requested top_k
-        results = self.retriever.invoke(query)
+        results = (
+            self.retriever.invoke(query)
+            if project_id is None
+            else self.retriever.invoke_filtered(
+                query,
+                self._project_positions(project_id),
+                n=top_k,
+            )
+        )
         logger.info(f"BM25 retrieval returned {len(results)} results")
 
         # Convert results to NodeInfo objects and apply filtering
@@ -996,6 +1060,7 @@ class BM25CodeIndexer:
                 start_line=start_line,
                 end_line=end_line,
                 content=content,
+                project_id=project_id,
             )
 
             processed_results.append(result)
@@ -1238,6 +1303,7 @@ class BM25CodeIndexer:
             ),
             "max_k": self.max_k,
             "language": self.language,
+            "project_metadata_schema": 9 if self.project_filter_available else None,
         }
         metadata_file = os.path.join(directory_path, "bm25_metadata.json")
         _write_json_interruptibly(
@@ -1310,6 +1376,7 @@ class BM25CodeIndexer:
         self.source_mode = source_mode
         self._source_binding = None
         self._documents_prepared = False
+        self.project_filter_available = False
         self.max_k = max_k
         self.language = language
 
@@ -1338,3 +1405,8 @@ class BM25CodeIndexer:
 
         self.retriever = BM25Retriever.from_documents(self.documents, k=self.max_k)
         self._documents_prepared = True
+        self.project_filter_available = bool(self.documents) and all(
+            isinstance(document.metadata.get("project_id"), str)
+            and document.metadata["project_id"].startswith("project://")
+            for document in self.documents
+        )

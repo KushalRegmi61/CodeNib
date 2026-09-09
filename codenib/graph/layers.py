@@ -16,13 +16,18 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 from ..types import (
+    EDGE_TYPE_MANIFEST_DEPENDENCY,
     GRAPH_LAYER_ALL,
+    GRAPH_LAYER_ARCHITECTURE,
     GRAPH_LAYER_CONTAINMENT,
     GRAPH_LAYER_DEPENDENCY,
     GRAPH_LAYER_EDGE_TYPES,
     GRAPH_LAYER_IMPORT,
     GRAPH_LAYER_REFERENCE,
     GRAPH_LAYER_TYPE_USE,
+    NODE_TYPE_FILE,
+    NODE_TYPE_PROJECT,
+    NODE_TYPE_WORKSPACE,
     edge_types_for_graph_layer,
 )
 from .code_graph import CodeGraph
@@ -102,6 +107,11 @@ DEFAULT_LAYER_SPECS: Dict[str, GraphLayerSpec] = {
         GRAPH_LAYER_TYPE_USE,
         GRAPH_LAYER_EDGE_TYPES[GRAPH_LAYER_TYPE_USE],
         "Type-use edges when a decoder emits them separately.",
+    ),
+    GRAPH_LAYER_ARCHITECTURE: GraphLayerSpec(
+        GRAPH_LAYER_ARCHITECTURE,
+        GRAPH_LAYER_EDGE_TYPES[GRAPH_LAYER_ARCHITECTURE],
+        "Workspace/project containment and manifest dependency edges.",
     ),
 }
 
@@ -200,6 +210,17 @@ class MultiGraphIndex:
             self.specs,
             use_core=use_core,
         )
+        if GRAPH_LAYER_ARCHITECTURE in self.specs:
+            # ``contain`` is shared by source and architecture structure. The
+            # type-only classifier cannot distinguish them, so architecture
+            # views must additionally validate endpoint node kinds.
+            architecture_spec = self.specs[GRAPH_LAYER_ARCHITECTURE]
+            self._edge_ids_by_layer[GRAPH_LAYER_ARCHITECTURE] = [
+                edge.index
+                for edge in code_graph.graph.es
+                if architecture_spec.matches(edge.attributes().get("type"))
+                and _is_architecture_edge(code_graph, edge)
+            ]
 
     def layer_names(self) -> List[str]:
         return list(self.specs)
@@ -279,6 +300,16 @@ def _is_default_specs(specs: Mapping[str, GraphLayerSpec]) -> bool:
 
 def _edge_types(code_graph: CodeGraph) -> List[Optional[str]]:
     return [edge.attributes().get("type") for edge in code_graph.graph.es]
+
+
+def _is_architecture_edge(code_graph: CodeGraph, edge) -> bool:
+    source_type = code_graph.graph.vs[edge.source].attributes().get("type")
+    target_type = code_graph.graph.vs[edge.target].attributes().get("type")
+    if edge.attributes().get("type") == EDGE_TYPE_MANIFEST_DEPENDENCY:
+        return source_type == NODE_TYPE_PROJECT and target_type == NODE_TYPE_PROJECT
+    return (
+        source_type == NODE_TYPE_WORKSPACE and target_type == NODE_TYPE_PROJECT
+    ) or (source_type == NODE_TYPE_PROJECT and target_type == NODE_TYPE_FILE)
 
 
 def _classify_edge_layers_python(
