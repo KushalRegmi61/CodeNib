@@ -124,6 +124,26 @@ def test_scan_without_manifests_yields_synthetic_root(tmp_path):
     assert model.projects[0].synthetic
 
 
+def test_scan_adapters_ignore_foreign_manifests(tmp_path):
+    # package.json "dependencies" must not emit Cargo-style records and
+    # vice versa: every edge's source manifest belongs to its adapter kind.
+    _node_monorepo(tmp_path)
+    _write(
+        tmp_path / "Cargo.toml",
+        '[workspace]\nmembers = ["crates/*"]\n',
+    )
+    _write(tmp_path / "crates" / "base" / "Cargo.toml", '[package]\nname = "base"\n')
+    model = scan_workspace(str(tmp_path))
+    for project in model.projects:
+        for dep in project.dependencies:
+            if dep.source_manifest.endswith("package.json"):
+                assert (
+                    dep.unresolved_reason != "no internal Cargo path/workspace target"
+                )
+    bar = _by_path(model)["packages/bar"]
+    assert len(bar.dependencies) == 1
+
+
 def test_scan_is_deterministic(tmp_path):
     _node_monorepo(tmp_path)
     first = scan_workspace(str(tmp_path))

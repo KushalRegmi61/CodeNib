@@ -67,7 +67,7 @@ class BazelAdapter:
             (item for item in context.records if item.path in project.manifest_paths),
             None,
         )
-        if record is None:
+        if record is None or record.kind != "bazel_package":
             return []
         text = str((record.data or {}).get("text", ""))
         labels = sorted(set(match.group("label") for match in _LABEL_RE.finditer(text)))

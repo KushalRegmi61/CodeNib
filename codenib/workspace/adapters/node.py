@@ -130,7 +130,7 @@ class NodeWorkspaceAdapter:
             (item for item in context.records if item.path in project.manifest_paths),
             None,
         )
-        if record is None:
+        if record is None or record.kind != "node_package":
             return []
         data = dict(record.data or {})
         # Ambiguous local names stay unresolved (never guess): duplicates are

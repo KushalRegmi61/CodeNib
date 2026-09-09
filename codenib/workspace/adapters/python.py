@@ -112,7 +112,7 @@ class PythonAdapter:
             (item for item in context.records if item.path in project.manifest_paths),
             None,
         )
-        if record is None:
+        if record is None or record.kind != "python_pyproject":
             return []
         # Ambiguous distribution names stay unresolved (never guess).
         names = unique_name_index(projects, normalize_distribution_name)

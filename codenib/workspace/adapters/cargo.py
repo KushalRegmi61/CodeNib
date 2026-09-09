@@ -69,7 +69,9 @@ class CargoAdapter:
             (item for item in context.records if item.path in project.manifest_paths),
             None,
         )
-        if record is None:
+        # Only Cargo manifests: a foreign record (e.g. package.json) can share
+        # the "dependencies" key and would otherwise emit bogus edges.
+        if record is None or record.kind != "cargo_manifest":
             return []
         data = dict(record.data or {})
         # Workspace-inherited names follow Cargo's hyphen/underscore
