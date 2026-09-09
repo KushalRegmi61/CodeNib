@@ -58,6 +58,55 @@ def test_hook_parsers_wire_subcommands() -> None:
     assert status.json is True
 
 
+def test_hook_install_parser_accepts_command() -> None:
+    from codenib import cli
+
+    parsed = cli.build_parser().parse_args(
+        ["codegraph", "hook", "install", ".", "--command", sys.executable]
+    )
+    assert parsed.server_command == sys.executable
+
+    defaulted = cli.build_parser().parse_args(["codegraph", "hook", "install", "."])
+    assert defaulted.server_command is None
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["codegraph", "hook", "status", ".", "--command", sys.executable]
+        )
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["codegraph", "hook", "uninstall", ".", "--command", sys.executable]
+        )
+
+
+def test_hook_install_handler_passes_explicit_command(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    import codenib.codegraph_hooks as hooks
+    from codenib import cli
+
+    captured: dict = {}
+
+    def fake_install(repo_path, *, mode, batch_size, codenib_argv, force, dry_run):
+        captured["argv"] = codenib_argv
+        return SimpleNamespace(hooks=("post-commit",), mode=mode)
+
+    monkeypatch.setattr(hooks, "install_hooks", fake_install)
+    args = SimpleNamespace(
+        repo=str(tmp_path),
+        mode=None,
+        embedding_batch_size=None,
+        server_command=sys.executable,
+        force=False,
+        dry_run=True,
+    )
+
+    assert cli._run_codegraph_hook_install(args) == 0
+    assert captured["argv"][0].startswith(sys.executable)
+
+
 def test_render_hook_script_contains_marker_and_command() -> None:
     script = render_hook_script(
         ("codenib", "index", "/repo", "--preset", "auto"),

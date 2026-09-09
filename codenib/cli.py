@@ -2792,7 +2792,7 @@ def _run_codegraph_hook_install(args: argparse.Namespace) -> int:
         source="--embedding-batch-size",
     )
     try:
-        command, prefix = resolve_codenib_command()
+        command, prefix = resolve_codenib_command(args.server_command)
         receipt = install_hooks(
             repo_path,
             mode=resolve_hook_mode(args.mode),
@@ -3401,6 +3401,11 @@ def build_parser() -> argparse.ArgumentParser:
                 help="hook execution mode (default: CODENIB_HOOK_MODE or background)",
             )
         if hook_command == "install":
+            hook_parser.add_argument(
+                "--command",
+                dest="server_command",
+                help="CodeNib executable recorded into the hook command",
+            )
             hook_parser.add_argument(
                 "--embedding-batch-size",
                 type=int,

@@ -186,6 +186,8 @@ without reinstalling:
 
 Hooks refuse to overwrite hook files they did not write (use `--force`),
 and `codenib codegraph hook uninstall` removes only CodeNib-managed hooks.
+Pass `hook install --command` to override the recorded CodeNib executable
+(e.g. a venv binary instead of the PATH release).
 Indexes and MCP registrations are preserved. A dirty tree keeps views
 `stale` by design — commit first, then let the hook rebuild.
 
