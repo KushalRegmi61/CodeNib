@@ -330,3 +330,77 @@ def test_architecture_layer_filters_shared_containment_by_endpoint_type():
         ref.source_name.startswith(("workspace://", "project://"))
         for ref in layer.iter_edges()
     )
+
+
+def test_second_distinct_manifest_edge_with_evidence_does_not_crash(tmp_path):
+    graph = CodeGraph("repo")
+    for project_id in ("project://a", "project://b", "project://c"):
+        graph.add_architecture_vertex(
+            project_id, {"type": NODE_TYPE_PROJECT, "project_id": project_id}
+        )
+
+    def _evidence(name, manifest):
+        return {
+            "declared_name": name,
+            "scope": "runtime",
+            "specifier": "^1",
+            "source_manifest": manifest,
+            "resolution": "workspace",
+        }
+
+    graph.add_architecture_edge(
+        "project://a",
+        "project://b",
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
+        manifest_evidence=(_evidence("b", "a/package.json"),),
+    )
+    graph.add_architecture_edge(
+        "project://a",
+        "project://c",
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
+        manifest_evidence=(_evidence("c", "a/package.json"),),
+    )
+
+    by_target = {
+        graph.graph.vs[edge.target]["name"]: edge.attributes().get("manifest_evidence")
+        for edge in graph.graph.es
+    }
+    assert by_target["project://b"][0]["declared_name"] == "b"
+    assert by_target["project://c"][0]["declared_name"] == "c"
+
+    path = tmp_path / "graph.pkl"
+    graph.save_graph(path)
+    loaded = CodeGraph.load_graph(path)
+    reloaded = {
+        loaded.graph.vs[edge.target]["name"]: edge.attributes().get("manifest_evidence")
+        for edge in loaded.graph.es
+    }
+    assert reloaded == by_target
+
+
+def test_manifest_evidence_load_accepts_unsorted_list(tmp_path):
+    graph = CodeGraph("repo")
+    for project_id in ("project://a", "project://b"):
+        graph.add_architecture_vertex(
+            project_id, {"type": NODE_TYPE_PROJECT, "project_id": project_id}
+        )
+    first = {
+        "declared_name": "b",
+        "scope": "runtime",
+        "specifier": "^1",
+        "source_manifest": "a/package.json",
+        "resolution": "workspace",
+    }
+    second = {**first, "scope": "optional"}
+    graph.add_architecture_edge(
+        "project://a",
+        "project://b",
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
+        manifest_evidence=(first, second),
+    )
+    # Simulate an unsorted list-pickled payload reaching the loader.
+    graph.graph.es[0]["manifest_evidence"] = [second, first]
+    path = tmp_path / "graph.pkl"
+    graph.save_graph(path)
+    loaded = CodeGraph.load_graph(path)
+    assert len(loaded.graph.es[0]["manifest_evidence"]) == 2

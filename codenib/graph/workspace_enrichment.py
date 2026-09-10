@@ -170,7 +170,7 @@ def architecture_digest(graph: CodeGraph) -> str:
                 "source": source["name"],
                 "target": target["name"],
                 "type": edge.attributes().get("type"),
-                "manifest_evidence": edge.attributes().get("manifest_evidence", ()),
+                "manifest_evidence": edge.attributes().get("manifest_evidence") or (),
             }
         )
     return digest_json(

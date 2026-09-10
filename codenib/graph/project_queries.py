@@ -362,7 +362,7 @@ def project_context_for_scope(
                 "source": source,
                 "target": target,
                 "type": EDGE_TYPE_MANIFEST_DEPENDENCY,
-                "evidence": list(attrs.get("manifest_evidence", ())),
+                "evidence": list(attrs.get("manifest_evidence") or ()),
             }
         )
     if len(dependencies) > max(1, int(max_edges)):
@@ -524,7 +524,7 @@ def project_dependency_subgraph(
         edge_evidence.setdefault(key, []).append(
             {
                 "manifest": True,
-                "evidence": edge.attributes().get("manifest_evidence", ()),
+                "evidence": edge.attributes().get("manifest_evidence") or (),
             }
         )
 
@@ -643,9 +643,8 @@ def find_projects_using(
                         "edge_type": edge_type,
                         "source_node": None,
                         "target_node": target_project,
-                        "manifest_evidence": edge.attributes().get(
-                            "manifest_evidence", ()
-                        ),
+                        "manifest_evidence": edge.attributes().get("manifest_evidence")
+                        or (),
                     }
                 )
 

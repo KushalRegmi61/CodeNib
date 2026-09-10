@@ -593,8 +593,10 @@ class CodeGraph:
             )
 
         edge_id = self._add_edge(source_name, target_name, edge_type)
-        if edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY and normalized_evidence:
-            existing = self.graph.es[edge_id].attributes().get("manifest_evidence", ())
+        if edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY:
+            existing = (
+                self.graph.es[edge_id].attributes().get("manifest_evidence") or ()
+            )
             merged = _normalize_manifest_evidence([*existing, *normalized_evidence])
             self.graph.es[edge_id]["manifest_evidence"] = merged
         return edge_id
@@ -1193,10 +1195,7 @@ class CodeGraph:
                         "manifest evidence is only valid on manifest dependency edges"
                     )
                 normalized = _normalize_manifest_evidence(evidence)
-                if tuple(evidence) != normalized:
-                    raise ValueError(
-                        "manifest evidence is not deterministically normalized"
-                    )
+                edge["manifest_evidence"] = normalized
         graph_instance.workspace_context = workspace_context
         if workspace_context is not None and workspace_context.get(
             "architecture_digest"
