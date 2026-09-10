@@ -195,6 +195,20 @@ reference, route, and bounded source-read tools. See the
 diagnostics, uninstall behavior, and language prerequisites, and the
 [MCP Server](https://docs.codenib.ai/mcp/) for the complete tool contract.
 
+For Claude Code, opt in to the project-local context planner:
+
+```bash
+codenib codegraph init /path/to/repository --install-context-planner
+```
+
+This installs the `context-planner` Skill, its three read-only agents
+(`scope-search`, `impact-navigator`, `evidence-auditor`) with routing and
+packet references under `.claude/`, plus a managed section in
+`.claude/CLAUDE.md`. Re-running `init` reconciles unchanged CodeNib-owned
+content and refuses to overwrite manually modified files. See the
+[CodeGraph guide](https://docs.codenib.ai/codegraph/) for the planner routing
+contract and removal behavior.
+
 The same planner is available directly to Python agents:
 
 ```python
