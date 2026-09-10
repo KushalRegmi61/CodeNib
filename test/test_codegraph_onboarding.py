@@ -219,7 +219,13 @@ def test_context_planner_install_is_idempotent_and_receiptable(tmp_path: Path) -
     assert first.claude_action == "create"
     assert second.skill_action == "current"
     assert second.claude_action == "current"
+    assert len(first.installation.managed_files) == 6
+    assert all(action == "current" for _path, action in second.asset_actions)
     assert (repo / ".claude/skills/context-planner/SKILL.md").is_file()
+    assert (repo / ".claude/agents/scope-search.md").is_file()
+    assert (
+        repo / ".claude/skills/context-planner/references/mcp-routing.md"
+    ).is_file()
     claude = (repo / ".claude/CLAUDE.md").read_text(encoding="utf-8")
     assert "local rules" not in claude
     assert "<!-- codenib:context-planner:start -->" in claude
@@ -291,7 +297,55 @@ def test_context_planner_uninstall_removes_only_managed_content(tmp_path: Path) 
     assert ".claude/skills/context-planner/SKILL.md" in removed
     assert ".claude/CLAUDE.md" in removed
     assert not (repo / ".claude/skills/context-planner/SKILL.md").exists()
+    assert not (repo / ".claude/agents/scope-search.md").exists()
+    assert not (
+        repo / ".claude/skills/context-planner/references/mcp-routing.md"
+    ).exists()
     assert claude_path.read_text(encoding="utf-8") == "# Keep this\n"
+
+
+def test_context_planner_refuses_modified_reference_asset(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    installation = install_context_planner(repo).installation
+    asset = repo / ".claude/agents/impact-navigator.md"
+    asset.write_text("modified planner agent\n", encoding="utf-8")
+
+    assert inspect_context_planner(repo).state == "drifted"
+    with pytest.raises(CodeGraphOnboardingError, match="modified context-planner asset"):
+        remove_context_planner(repo, installation)
+
+
+def test_schema_two_receipt_is_read_and_rewritten_as_schema_three(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repository(tmp_path)
+    monkeypatch.setenv("CODENIB_HOME", str(tmp_path / "state"))
+    installation = install_context_planner(repo).installation
+    receipt = CodeGraphReceipt(repo, _server(repo), ()).with_context_planner(
+        ContextPlannerInstallation(
+            installation.skill_sha256,
+            installation.claude_block_sha256,
+            installation.skill_created,
+            installation.claude_created,
+        )
+    )
+    path = write_codegraph_receipt(receipt)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_codegraph_receipt(repo)
+    assert loaded is not None
+    assert loaded.context_planner is not None
+    assert loaded.context_planner.managed_files == ()
+
+    refreshed = install_context_planner(repo, receipt=loaded)
+    upgraded = write_codegraph_receipt(
+        loaded.with_context_planner(refreshed.installation)
+    )
+    assert json.loads(upgraded.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert len(loaded.with_context_planner(refreshed.installation).context_planner.managed_files) == 6
 
 
 def test_cli_context_planner_uninstall_updates_receipt(
@@ -338,6 +392,12 @@ def test_context_planner_instruction_assets_are_packaged() -> None:
 
     assert package.joinpath("SKILL.md").is_file()
     assert package.joinpath("CLAUDE.md.fragment").is_file()
+    assert package.joinpath("agents/scope-search.md").is_file()
+    assert package.joinpath("agents/impact-navigator.md").is_file()
+    assert package.joinpath("agents/evidence-auditor.md").is_file()
+    assert package.joinpath("references/mcp-routing.md").is_file()
+    assert package.joinpath("references/packet-contract.md").is_file()
+    assert package.joinpath("references/failure-modes.md").is_file()
 
 
 @pytest.mark.parametrize(

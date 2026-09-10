@@ -2071,6 +2071,7 @@ def _codegraph_error(exc: BaseException) -> CLIError:
 
 def _codegraph_spec_for_args(repo_path: Path, args: argparse.Namespace):
     from .codegraph_onboarding import (
+        CONTEXT_PLANNER_MANAGED_PATHS,
         CodeGraphOnboardingError,
         load_codegraph_receipt,
         make_server_spec,
@@ -2230,6 +2231,7 @@ def _require_unchanged_codegraph_checkout(
 
 def _run_codegraph_init(args: argparse.Namespace) -> int:
     from .codegraph_onboarding import (
+        CONTEXT_PLANNER_MANAGED_PATHS,
         CodeGraphOnboardingError,
         CodeGraphReceipt,
         add_client_registration,
@@ -2321,6 +2323,8 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
                 f"Skill {planner_plan.skill_action}; "
                 f"CLAUDE.md {planner_plan.claude_action}"
             )
+            for path, action in planner_plan.asset_actions:
+                print(f"  context-planner asset: {action} {path}")
         ready_after_install = not manual and not project_blockers
         print(
             "Readiness:  "
@@ -2437,8 +2441,7 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
             checkout_snapshot,
             stage="context-planner installation",
             allowed_paths=(
-                ".claude/skills/context-planner/SKILL.md",
-                ".claude/CLAUDE.md",
+                path.as_posix() for path in CONTEXT_PLANNER_MANAGED_PATHS
             ),
         )
 
@@ -2452,7 +2455,10 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
         "dependency_subgraph for impact analysis."
     )
     if args.install_context_planner:
-        print("Context planner: installed in .claude/skills and .claude/CLAUDE.md")
+        print(
+            "Context planner: installed in .claude/skills, .claude/agents, "
+            "and .claude/CLAUDE.md"
+        )
     return 0
 
 
@@ -2618,6 +2624,7 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
                 "state": "missing",
                 "skill_state": "missing",
                 "claude_state": "missing",
+                "asset_states": {},
                 "detail": "integration receipt is invalid",
             },
             "receipt_error": str(exc),
@@ -2694,6 +2701,9 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
             "state": planner.state,
             "skill_state": planner.skill_state,
             "claude_state": planner.claude_state,
+            "asset_states": {
+                path: state for path, state in planner.asset_states
+            },
             "detail": planner.detail,
             "managed": receipt is not None and receipt.context_planner is not None,
         },

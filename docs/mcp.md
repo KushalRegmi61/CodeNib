@@ -142,6 +142,7 @@ Only tools whose backing views are fresh and available can return results.
 | `search_regex` | `symbol_graph` | file / symbol | Structural pattern matching |
 | `search_zoekt` | `zoekt` | file | Fast substring or regex search over files |
 | `dependency_subgraph` | `symbol_graph` | call graph | Caller impact, callee dependencies, or a one-hop neighborhood |
+| `find_projects_using` | workspace/project graph | project | Bounded cross-project consumers of a resolved shared symbol |
 | `lsp_definition` | runtime LSP provider or `symbol_graph` fallback | location | Static go-to-definition-shaped lookup |
 | `lsp_references` | runtime LSP provider or `symbol_graph` fallback | locations | Static find-references-shaped lookup |
 | `lsp_route` | runtime LSP provider or `symbol_graph` fallback | locations | Compact route anchors from symbol seeds or a bounded query fallback |

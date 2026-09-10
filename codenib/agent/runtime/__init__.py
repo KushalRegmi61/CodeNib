@@ -10,6 +10,21 @@ from typing import TYPE_CHECKING, Any
 
 from ..._lazy import exported_dir, load_export
 from .context import ContextLedger, ContextLedgerEntry
+from .planner import (
+    LiveToolBinding,
+    PLANNER_AGENTS,
+    PLANNER_CLAIM_STATUSES,
+    PLANNER_LOGICAL_TOOLS,
+    PLANNER_PACKET_STATUSES,
+    PLANNER_PACKET_VERSION,
+    PlannerPacketError,
+    deterministic_evidence_id,
+    evidence_id_for_claim,
+    ingest_planner_packet,
+    normalize_planner_packet,
+    record_planner_packet,
+    resolve_live_tool_names,
+)
 from .trace import AGENT_TRACE_SCHEMA_VERSION, AgentRunTrace, AgentTraceEvent
 
 if TYPE_CHECKING:  # pragma: no cover - imported only by static analyzers
@@ -70,6 +85,13 @@ __all__ = [
     "AgentTraceEvent",
     "ContextLedger",
     "ContextLedgerEntry",
+    "LiveToolBinding",
+    "PLANNER_AGENTS",
+    "PLANNER_CLAIM_STATUSES",
+    "PLANNER_LOGICAL_TOOLS",
+    "PLANNER_PACKET_STATUSES",
+    "PLANNER_PACKET_VERSION",
+    "PlannerPacketError",
     "REPOSITORY_EXPLORER_POLICIES",
     "RepositoryContextExplorer",
     "RepositoryEvidence",
@@ -78,6 +100,12 @@ __all__ = [
     "RepositoryExploreTrace",
     "RepositoryExplorerCapabilityError",
     "normalize_repository_explorer_policy",
+    "deterministic_evidence_id",
+    "evidence_id_for_claim",
+    "ingest_planner_packet",
+    "normalize_planner_packet",
+    "record_planner_packet",
+    "resolve_live_tool_names",
     "repository_explorer_build_views",
 ]
 

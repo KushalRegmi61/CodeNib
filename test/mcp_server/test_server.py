@@ -188,6 +188,33 @@ def test_default_server_registers_complete_compatible_tool_set() -> None:
     assert len(tools) == 13
 
 
+def test_full_mcp_tool_descriptions_preserve_planner_routing_contract() -> None:
+    server_mod.configure_tool_surface("full")
+
+    tools = {tool.name: tool for tool in asyncio.run(server_mod.mcp.list_tools())}
+    expected_phrases = {
+        "explore_context": ("Recommended first call", "budget", "diagnostics"),
+        "search_context": ("deterministic", "budget", "provenance"),
+        "search_semantic": ("conceptual", "candidates", "read_source"),
+        "search_bm25": ("exact names", "filter_test", "read_source"),
+        "search_regex": ("structural", "node_type", "read_source"),
+        "search_zoekt": ("raw-text", "file_filter", "read_source"),
+        "dependency_subgraph": ("direction", "granularity", "unresolved"),
+        "find_projects_using": ("cross-project", "max_projects", "project IDs"),
+        "lsp_definition": ("definition", "1-based", "read_source"),
+        "lsp_references": ("references", "include_declaration", "transitive"),
+        "lsp_route": ("route", "symbols=[]", "read_source"),
+        "read_source": ("source window", "1-based", "verified"),
+        "get_manifest": ("Call once", "tool_surface", "provenance"),
+    }
+
+    assert set(tools) == set(expected_phrases)
+    for name, phrases in expected_phrases.items():
+        description = tools[name].description or ""
+        assert description
+        assert all(phrase in description for phrase in phrases), name
+
+
 def test_explore_tool_schema_is_bounded() -> None:
     tools = {tool.name: tool for tool in asyncio.run(server_mod.mcp.list_tools())}
     properties = tools["explore_context"].input_schema["properties"]

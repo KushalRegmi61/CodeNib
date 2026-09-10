@@ -833,7 +833,7 @@ async def read_source(
         "Call once at the start of an MCP connection or whenever capability state "
         "is uncertain. Returns repository path/commit/languages, loaded views, "
         "view errors, workspace/project-query and project-retrieval availability, "
-        "LSP provider selection, source verification, tool_surface, and session "
+        "LSP provider selection, source verification and provenance, tool_surface, and session "
         "usage. Use it to choose valid search/LSP/graph fallbacks; it does not "
         "return source context itself."
     ),

@@ -28,13 +28,26 @@ from ._version import package_version
 from .paths import repo_state_dir, repository_state_key
 
 CODEGRAPH_CLIENTS = ("codex", "claude")
-CODEGRAPH_RECEIPT_SCHEMA = 2
-_SUPPORTED_RECEIPT_SCHEMAS = frozenset({1, CODEGRAPH_RECEIPT_SCHEMA})
+CODEGRAPH_RECEIPT_SCHEMA = 3
+_SUPPORTED_RECEIPT_SCHEMAS = frozenset({1, 2, CODEGRAPH_RECEIPT_SCHEMA})
 CODEGRAPH_RECEIPT_DIRNAME = "codegraph"
 CODEGRAPH_RECEIPT_FILENAME = "agent-integrations.json"
 
 CONTEXT_PLANNER_SKILL_PATH = Path(".claude/skills/context-planner/SKILL.md")
 CONTEXT_PLANNER_CLAUDE_PATH = Path(".claude/CLAUDE.md")
+CONTEXT_PLANNER_ASSET_PATHS = (
+    Path(".claude/skills/context-planner/references/mcp-routing.md"),
+    Path(".claude/skills/context-planner/references/packet-contract.md"),
+    Path(".claude/skills/context-planner/references/failure-modes.md"),
+    Path(".claude/agents/scope-search.md"),
+    Path(".claude/agents/impact-navigator.md"),
+    Path(".claude/agents/evidence-auditor.md"),
+)
+CONTEXT_PLANNER_MANAGED_PATHS = (
+    CONTEXT_PLANNER_SKILL_PATH,
+    *CONTEXT_PLANNER_ASSET_PATHS,
+    CONTEXT_PLANNER_CLAUDE_PATH,
+)
 CONTEXT_PLANNER_MARKER_START = "<!-- codenib:context-planner:start -->"
 CONTEXT_PLANNER_MARKER_END = "<!-- codenib:context-planner:end -->"
 
@@ -70,6 +83,22 @@ class ManagedClient:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedPlannerFile:
+    """One additional planner asset tracked for safe refresh and removal."""
+
+    path: str
+    sha256: str
+    created: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "sha256": self.sha256,
+            "created": self.created,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ContextPlannerInstallation:
     """Receipt data for files CodeNib installed into one project."""
 
@@ -77,9 +106,10 @@ class ContextPlannerInstallation:
     claude_block_sha256: str
     skill_created: bool
     claude_created: bool
+    managed_files: tuple[ManagedPlannerFile, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "skill_path": CONTEXT_PLANNER_SKILL_PATH.as_posix(),
             "skill_sha256": self.skill_sha256,
             "claude_path": CONTEXT_PLANNER_CLAUDE_PATH.as_posix(),
@@ -87,6 +117,11 @@ class ContextPlannerInstallation:
             "skill_created": self.skill_created,
             "claude_created": self.claude_created,
         }
+        if self.managed_files:
+            payload["managed_files"] = [
+                item.to_dict() for item in self.managed_files
+            ]
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +132,7 @@ class ContextPlannerInspection:
     skill_state: str
     claude_state: str
     detail: str
+    asset_states: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +142,7 @@ class ContextPlannerInstallPlan:
     installation: ContextPlannerInstallation
     skill_action: str
     claude_action: str
+    asset_actions: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,18 +395,26 @@ def _parse_context_planner_receipt(
 ) -> ContextPlannerInstallation | None:
     if value is None:
         return None
-    item = _strict_keys(
-        value,
-        {
-            "skill_path",
-            "skill_sha256",
-            "claude_path",
-            "claude_block_sha256",
-            "skill_created",
-            "claude_created",
-        },
-        field="context_planner",
-    )
+    if type(value) is not dict:
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt object: context_planner"
+        )
+    required_keys = {
+        "skill_path",
+        "skill_sha256",
+        "claude_path",
+        "claude_block_sha256",
+        "skill_created",
+        "claude_created",
+    }
+    optional_keys = {"managed_files"}
+    if not set(value).issubset(required_keys | optional_keys) or not required_keys.issubset(
+        value
+    ):
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt object: context_planner"
+        )
+    item: Mapping[str, object] = value
     if item["skill_path"] != CONTEXT_PLANNER_SKILL_PATH.as_posix():
         raise CodeGraphOnboardingError(
             "invalid CodeGraph integration receipt field: context_planner.skill_path"
@@ -377,6 +422,45 @@ def _parse_context_planner_receipt(
     if item["claude_path"] != CONTEXT_PLANNER_CLAUDE_PATH.as_posix():
         raise CodeGraphOnboardingError(
             "invalid CodeGraph integration receipt field: context_planner.claude_path"
+        )
+    managed_files: list[ManagedPlannerFile] = []
+    raw_managed_files = item.get("managed_files", [])
+    if type(raw_managed_files) is not list:
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt field: context_planner.managed_files"
+        )
+    allowed_paths = {path.as_posix() for path in CONTEXT_PLANNER_ASSET_PATHS}
+    for index, raw_file in enumerate(raw_managed_files):
+        entry = _strict_keys(
+            raw_file,
+            {"path", "sha256", "created"},
+            field=f"context_planner.managed_files[{index}]",
+        )
+        path = _strict_string(
+            entry["path"],
+            field=f"context_planner.managed_files[{index}].path",
+        )
+        if path not in allowed_paths:
+            raise CodeGraphOnboardingError(
+                "invalid CodeGraph integration receipt field: "
+                f"context_planner.managed_files[{index}].path"
+            )
+        managed_files.append(
+            ManagedPlannerFile(
+                path=path,
+                sha256=_strict_sha256(
+                    entry["sha256"],
+                    field=f"context_planner.managed_files[{index}].sha256",
+                ),
+                created=_strict_bool(
+                    entry["created"],
+                    field=f"context_planner.managed_files[{index}].created",
+                ),
+            )
+        )
+    if len({item.path for item in managed_files}) != len(managed_files):
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt object: duplicate managed file"
         )
     return ContextPlannerInstallation(
         skill_sha256=_strict_sha256(
@@ -392,6 +476,7 @@ def _parse_context_planner_receipt(
         claude_created=_strict_bool(
             item["claude_created"], field="context_planner.claude_created"
         ),
+        managed_files=tuple(managed_files),
     )
 
 
@@ -503,11 +588,35 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _context_planner_assets() -> tuple[str, str]:
+def _context_planner_assets() -> tuple[dict[Path, str], str]:
     package = importlib.resources.files("codenib.agent.instructions.context_planner")
+    resource_paths = {
+        CONTEXT_PLANNER_ASSET_PATHS[0]: package.joinpath(
+            "references", "mcp-routing.md"
+        ),
+        CONTEXT_PLANNER_ASSET_PATHS[1]: package.joinpath(
+            "references", "packet-contract.md"
+        ),
+        CONTEXT_PLANNER_ASSET_PATHS[2]: package.joinpath(
+            "references", "failure-modes.md"
+        ),
+        CONTEXT_PLANNER_ASSET_PATHS[3]: package.joinpath(
+            "agents", "scope-search.md"
+        ),
+        CONTEXT_PLANNER_ASSET_PATHS[4]: package.joinpath(
+            "agents", "impact-navigator.md"
+        ),
+        CONTEXT_PLANNER_ASSET_PATHS[5]: package.joinpath(
+            "agents", "evidence-auditor.md"
+        ),
+    }
     try:
+        contents = {
+            path: resource.read_text(encoding="utf-8")
+            for path, resource in resource_paths.items()
+        }
         return (
-            package.joinpath("SKILL.md").read_text(encoding="utf-8"),
+            contents,
             package.joinpath("CLAUDE.md.fragment").read_text(encoding="utf-8"),
         )
     except (FileNotFoundError, OSError, UnicodeError) as exc:
@@ -617,14 +726,36 @@ def _remove_context_planner_block(content: str) -> str:
 def _context_planner_plan(
     repository: str | Path,
     receipt: CodeGraphReceipt | None = None,
-) -> tuple[ContextPlannerInstallPlan, str, str, str]:
+) -> tuple[
+    ContextPlannerInstallPlan,
+    str,
+    str,
+    str,
+    dict[Path, str],
+]:
     repo = Path(repository).expanduser().resolve()
     skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
     claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
-    skill_content, fragment = _context_planner_assets()
+    asset_contents, fragment = _context_planner_assets()
+    package = importlib.resources.files("codenib.agent.instructions.context_planner")
+    try:
+        skill_content = package.joinpath("SKILL.md").read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeError) as exc:
+        raise CodeGraphOnboardingError(
+            f"context-planner instruction assets are unavailable: {exc}"
+        ) from exc
     block = _context_planner_block(fragment)
     _safe_directory(repo / ".claude", label=".claude")
     _safe_directory(repo / ".claude" / "skills", label=".claude/skills")
+    _safe_directory(repo / ".claude" / "agents", label=".claude/agents")
+    _safe_directory(
+        repo / ".claude" / "skills" / "context-planner",
+        label=".claude/skills/context-planner",
+    )
+    _safe_directory(
+        repo / ".claude" / "skills" / "context-planner" / "references",
+        label="context-planner references",
+    )
     current_skill = _safe_existing_file(skill_path, label="context-planner Skill")
     current_claude = _safe_existing_file(claude_path, label="CLAUDE.md")
     previous = receipt.context_planner if receipt is not None else None
@@ -669,17 +800,56 @@ def _context_planner_plan(
                     f"section in {claude_path}"
                 )
 
+    asset_actions: list[tuple[str, str]] = []
+    managed_files: list[ManagedPlannerFile] = []
+    previous_files = {
+        item.path: item for item in (previous.managed_files if previous else ())
+    }
+    for relative_path, content in asset_contents.items():
+        path = repo / relative_path
+        current = _safe_existing_file(path, label=f"context-planner asset {relative_path}")
+        prior = previous_files.get(relative_path.as_posix())
+        if current is None:
+            action = "create"
+            created = prior.created if prior is not None else True
+        elif current == content:
+            action = "current"
+            created = prior.created if prior is not None else False
+        elif prior is not None and _sha256_text(current) == prior.sha256:
+            action = "refresh"
+            created = prior.created
+        else:
+            raise CodeGraphOnboardingError(
+                "refusing to overwrite unmanaged or modified context-planner "
+                f"asset: {path}"
+            )
+        asset_actions.append((relative_path.as_posix(), action))
+        managed_files.append(
+            ManagedPlannerFile(
+                path=relative_path.as_posix(),
+                sha256=_sha256_text(content),
+                created=created,
+            )
+        )
+
     installation = ContextPlannerInstallation(
         skill_sha256=_sha256_text(skill_content),
         claude_block_sha256=_sha256_text(block),
         skill_created=skill_created,
         claude_created=claude_created,
+        managed_files=tuple(managed_files),
     )
     return (
-        ContextPlannerInstallPlan(installation, skill_action, claude_action),
+        ContextPlannerInstallPlan(
+            installation,
+            skill_action,
+            claude_action,
+            tuple(asset_actions),
+        ),
         skill_content,
         block,
         current_claude or "",
+        asset_contents,
     )
 
 
@@ -691,7 +861,7 @@ def install_context_planner(
 ) -> ContextPlannerInstallPlan:
     """Install the project-local context-planner Skill and guidance."""
 
-    plan, skill_content, block, current_claude = _context_planner_plan(
+    plan, skill_content, block, current_claude, asset_contents = _context_planner_plan(
         repository,
         receipt,
     )
@@ -703,6 +873,12 @@ def install_context_planner(
     claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
     if plan.skill_action != "current":
         _atomic_write_text(skill_path, skill_content)
+    for relative_path, action in plan.asset_actions:
+        if action != "current":
+            _atomic_write_text(
+                repo / relative_path,
+                asset_contents[Path(relative_path)],
+            )
     if plan.claude_action == "create":
         _atomic_write_text(claude_path, block)
     elif plan.claude_action in {"append", "refresh"}:
@@ -723,7 +899,11 @@ def inspect_context_planner(
     skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
     claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
     try:
-        skill_content, fragment = _context_planner_assets()
+        asset_contents, fragment = _context_planner_assets()
+        package = importlib.resources.files(
+            "codenib.agent.instructions.context_planner"
+        )
+        skill_content = package.joinpath("SKILL.md").read_text(encoding="utf-8")
         expected_block = _context_planner_block(fragment)
         skill = _safe_existing_file(skill_path, label="context-planner Skill")
         claude = _safe_existing_file(claude_path, label="CLAUDE.md")
@@ -742,10 +922,28 @@ def inspect_context_planner(
                 if extracted is None
                 else "current" if extracted[1] == expected_block else "drifted"
             )
-    except CodeGraphOnboardingError as exc:
-        return ContextPlannerInspection("drifted", "drifted", "drifted", str(exc))
+        asset_states = []
+        for relative_path, expected in asset_contents.items():
+            observed = _safe_existing_file(
+                repo / relative_path,
+                label=f"context-planner asset {relative_path}",
+            )
+            asset_states.append(
+                (
+                    relative_path.as_posix(),
+                    "missing"
+                    if observed is None
+                    else "current"
+                    if observed == expected
+                    else "drifted",
+                )
+            )
+    except (CodeGraphOnboardingError, OSError, UnicodeError) as exc:
+        return ContextPlannerInspection(
+            "drifted", "drifted", "drifted", str(exc)
+        )
 
-    states = (skill_state, claude_state)
+    states = (skill_state, claude_state, *(state for _path, state in asset_states))
     if "drifted" in states:
         state = "drifted"
     elif "missing" in states:
@@ -753,10 +951,20 @@ def inspect_context_planner(
     else:
         state = "current"
     managed = receipt is not None and receipt.context_planner is not None
-    detail = f"Skill {skill_state}; CLAUDE.md {claude_state}"
+    detail = (
+        f"Skill {skill_state}; assets "
+        f"{sum(state == 'current' for _path, state in asset_states)}/"
+        f"{len(asset_states)} current; CLAUDE.md {claude_state}"
+    )
     if state == "current" and not managed:
         detail += "; installation is not recorded in the CodeNib receipt"
-    return ContextPlannerInspection(state, skill_state, claude_state, detail)
+    return ContextPlannerInspection(
+        state,
+        skill_state,
+        claude_state,
+        detail,
+        tuple(asset_states),
+    )
 
 
 def remove_context_planner(
@@ -778,6 +986,22 @@ def remove_context_planner(
         if installation.skill_created:
             skill_path.unlink()
             removed.append(str(CONTEXT_PLANNER_SKILL_PATH))
+
+    for managed_file in installation.managed_files:
+        path = repo / managed_file.path
+        observed = _safe_existing_file(
+            path,
+            label=f"context-planner asset {managed_file.path}",
+        )
+        if observed is None:
+            continue
+        if _sha256_text(observed) != managed_file.sha256:
+            raise CodeGraphOnboardingError(
+                f"refusing to remove modified context-planner asset: {path}"
+            )
+        if managed_file.created:
+            path.unlink()
+            removed.append(managed_file.path)
 
     claude = _safe_existing_file(claude_path, label="CLAUDE.md")
     if claude is not None:
@@ -1070,7 +1294,9 @@ def remove_client_registration(
 
 __all__ = [
     "CODEGRAPH_CLIENTS",
+    "CONTEXT_PLANNER_ASSET_PATHS",
     "CONTEXT_PLANNER_CLAUDE_PATH",
+    "CONTEXT_PLANNER_MANAGED_PATHS",
     "CONTEXT_PLANNER_MARKER_END",
     "CONTEXT_PLANNER_MARKER_START",
     "CONTEXT_PLANNER_SKILL_PATH",
@@ -1080,6 +1306,7 @@ __all__ = [
     "ContextPlannerInstallation",
     "ContextPlannerInspection",
     "ContextPlannerInstallPlan",
+    "ManagedPlannerFile",
     "MCPServerSpec",
     "ServerCommandInspection",
     "add_client_registration",

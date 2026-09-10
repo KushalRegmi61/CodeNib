@@ -57,12 +57,14 @@ Claude guidance, opt in explicitly:
 codenib codegraph init /path/to/repository --install-context-planner
 ```
 
-This writes `.claude/skills/context-planner/SKILL.md` and a marked section in
-`.claude/CLAUDE.md`. The files are project-local; CodeNib does not write
-`~/.claude`, `.codex/skills`, or `AGENTS.md`. Use `--dry-run` to preview the
-instruction changes. `codegraph status` reports the planner as `current`,
-`missing`, or `drifted`, and `codegraph uninstall --remove-context-planner`
-removes only unchanged files managed by CodeNib.
+This writes the Skill, three read-only planner agents, and reference files under
+`.claude/`, plus a marked section in `.claude/CLAUDE.md`. The files are
+project-local; CodeNib does not write `~/.claude`, `.codex/skills`, or
+`AGENTS.md`. Use `--dry-run` to preview every managed file. The installed
+guidance resolves the live MCP registration rather than hardcoding a tool
+prefix. `codegraph status` reports the planner as `current`, `missing`, or
+`drifted`, and `codegraph uninstall --remove-context-planner` removes only
+unchanged files managed by CodeNib.
 
 The repository must be a clean Git working tree. The initializer does not run
 project package managers or build systems; it checks the worktree again after

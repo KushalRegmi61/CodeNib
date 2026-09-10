@@ -31,11 +31,12 @@ then installs package-managed graph providers, builds `bm25` and
 
 By default CodeNib does not edit Codex TOML, Claude JSON, `.mcp.json`,
 `AGENTS.md`, or `CLAUDE.md` itself. Pass `--install-context-planner` to
-explicitly install the project-local `.claude/skills/context-planner/SKILL.md`
-and a managed section in `.claude/CLAUDE.md`; it never writes user-level skill
-directories or `AGENTS.md`. It never writes an index into the target checkout. A
-readable repository slug plus a path digest makes the server name unique, so
-several checkouts can coexist.
+explicitly install the project-local context-planner Skill, its three read-only
+agents, and routing/packet references under `.claude/`, plus a managed section
+in `.claude/CLAUDE.md`; it never writes user-level skill directories or
+`AGENTS.md`. It never writes an index into the target checkout. A readable
+repository slug plus a path digest makes the server name unique, so several
+checkouts can coexist.
 
 Initialization requires a clean Git working tree and verifies the same status
 again after indexing and native client registration. CodeNib may install its
@@ -57,13 +58,17 @@ codenib codegraph init . --install-context-planner --dry-run
 
 Running the same initialization again reuses a current index and matching
 native registrations. With `--install-context-planner`, the same command also
-reconciles unchanged CodeNib-owned Skill/guidance content and refuses to
-overwrite manually modified files or an unmanaged context-planner section.
+reconciles unchanged CodeNib-owned Skill, agent, reference, and guidance
+content and refuses to overwrite manually modified files or an unmanaged
+context-planner section.
 
-The installed Skill resolves MCP tool names from the live registration and
-does not hardcode a client-specific prefix. It starts with bounded
-`explore_context`, preserves project/file scope, and records provider/source
-diagnostics before making context claims.
+The installed Skill and agents resolve MCP tool names from the live registration
+and do not hardcode a client-specific prefix. They start with `get_manifest`
+and bounded `explore_context`, preserve project/file scope, route only the
+narrowest needed logical tool, and record provider/source diagnostics before
+making context claims. The planner records bounded packets through the existing
+agent trace/ledger seam when a host runtime supplies it; it does not create a
+second persistence system.
 
 ## Select the repository source surface
 
@@ -242,9 +247,10 @@ codenib codegraph uninstall /absolute/path/to/repository \
 ```
 
 CodeNib removes only clients named in its private per-repository receipt. With
-`--remove-context-planner`, it also removes only unchanged project-local Skill
-files or the unchanged managed guidance block. It first asks the native CLI
-for current client configuration and refuses removal if the command differs.
+`--remove-context-planner`, it also removes only unchanged project-local Skill,
+agent, and reference files or the unchanged managed guidance block. It first
+asks the native CLI for current client configuration and refuses removal if the
+command differs.
 Inspect that registration before explicitly overriding the guard:
 
 ```bash
