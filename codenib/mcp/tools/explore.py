@@ -18,14 +18,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...context_delivery import project_evidence_payloads
+from ...graph.project_queries import (
+    project_context_for_scope,
+    resolve_project_scope,
+)
 from ..explore_bounds import MAX_EXPLORE_PAYLOAD_BYTES, bound_explore_response
 from ._validation import (
     MAX_EXPLORE_WINDOWS,
     MAX_SEARCH_QUERY_CHARS,
+    MAX_SOURCE_PATH_CHARS,
     MAX_SOURCE_WINDOW_LINES,
     bounded_integer,
-    required_text,
+    bounded_text,
     optional_project_id,
+    required_text,
 )
 from .dependency import dependency_subgraph_impl
 from .lsp import lsp_route_impl, normalize_lsp_route_symbols
@@ -92,6 +98,8 @@ class _Anchor:
     rank: int
     score: float | None = None
     indexed_content: str | None = None
+    project_id: str | None = None
+    cross_project: bool = False
 
 
 def _positive_line(value: Any) -> int | None:
@@ -105,6 +113,7 @@ def _anchor_from_payload(
     *,
     origin: str,
     rank: int,
+    scope_project_id: str | None = None,
 ) -> _Anchor | None:
     if not isinstance(payload, Mapping):
         return None
@@ -138,6 +147,16 @@ def _anchor_from_payload(
         rank=rank,
         score=score,
         indexed_content=(indexed_content if isinstance(indexed_content, str) else None),
+        project_id=(
+            payload.get("project_id")
+            if isinstance(payload.get("project_id"), str)
+            else None
+        ),
+        cross_project=(
+            origin == "dependency"
+            and scope_project_id is not None
+            and payload.get("project_id") != scope_project_id
+        ),
     )
 
 
@@ -200,12 +219,14 @@ def _collect_anchors(
     *,
     origin: str,
     anchors: list[_Anchor],
+    scope_project_id: str | None = None,
 ) -> None:
     for payload in payloads:
         incoming = _anchor_from_payload(
             payload,
             origin=origin,
             rank=len(anchors),
+            scope_project_id=scope_project_id,
         )
         if incoming is None:
             continue
@@ -231,6 +252,11 @@ def _compact_anchor(anchor: _Anchor) -> dict[str, Any]:
         payload["end_line"] = anchor.end_line
     if anchor.score is not None:
         payload["score"] = anchor.score
+    if anchor.project_id is not None:
+        payload["project_id"] = anchor.project_id
+    if anchor.cross_project:
+        payload["cross_project"] = True
+        payload["scope"] = "dependency"
     return payload
 
 
@@ -403,6 +429,7 @@ def explore_context_impl(
     include_dependencies: bool = True,
     filter_test: bool = False,
     project_id: str | None = None,
+    file_path: str = "",
 ) -> dict[str, Any]:
     """Return ranked, routed, dependency-aware source context in one call."""
 
@@ -420,13 +447,31 @@ def explore_context_impl(
         raise ValueError("direction must be 'impact', 'dependencies', or 'both'.")
     normalized_symbols = normalize_lsp_route_symbols(symbols)
     project_id = optional_project_id(project_id)
+    normalized_file_path = bounded_text(
+        file_path or "", name="file_path", maximum=MAX_SOURCE_PATH_CHARS
+    ).strip()
+    scope = resolve_project_scope(
+        getattr(ctx, "symbol_graph", None),
+        project_id=project_id or "",
+        file_path=normalized_file_path,
+        query=normalized_query,
+    )
+    scope_project_id = scope.single_project_id
+    scope_blocked = bool(project_id and scope_project_id is None)
     profile = _BUDGETS[normalized_budget]
     window_limit = min(top_k, profile.max_windows)
 
-    diagnostics: list[dict[str, str]] = []
+    diagnostics: list[dict[str, Any]] = []
+    if scope_blocked:
+        diagnostics.append(
+            _diagnostic(
+                "project_scope_unresolved",
+                "explicit project scope could not be resolved; retrieval was not run",
+            )
+        )
     retrieval_response: Mapping[str, Any] | None = None
     retrieval_results: list[Any] = []
-    if (
+    if not scope_blocked and (
         getattr(ctx, "bm25", None) is not None
         or getattr(ctx, "vector", None) is not None
     ):
@@ -438,7 +483,7 @@ def explore_context_impl(
                 budget=normalized_budget,
                 level="l2",
                 filter_test=bool(filter_test),
-                project_id=project_id,
+                project_id=scope_project_id,
             )
             retrieval_response = result
             payloads = result.get("results", [])
@@ -448,13 +493,13 @@ def explore_context_impl(
             Exception
         ) as exc:  # noqa: BLE001 - composed backends degrade independently
             diagnostics.append(_diagnostic("retrieval_failed", exc))
-    else:
+    elif not scope_blocked:
         diagnostics.append(
             _diagnostic("retrieval_unavailable", "no ranked retrieval view is loaded")
         )
 
     route_results: list[Any] = []
-    if (
+    if not scope_blocked and (
         getattr(ctx, "lsp_provider", None) is not None
         or getattr(ctx, "symbol_graph", None) is not None
     ):
@@ -465,6 +510,7 @@ def explore_context_impl(
                 query=normalized_query,
                 top_k=profile.route_top_k,
                 include_neighbors=True,
+                project_id=scope_project_id,
             )
             if isinstance(routed, list):
                 route_results = routed
@@ -474,18 +520,32 @@ def explore_context_impl(
             Exception
         ) as exc:  # noqa: BLE001 - composed backends degrade independently
             diagnostics.append(_diagnostic("route_failed", exc))
-    else:
+    elif not scope_blocked:
         diagnostics.append(
             _diagnostic("route_unavailable", "symbol_graph index not available")
         )
 
     anchors: list[_Anchor] = []
-    _collect_anchors(retrieval_results, origin="retrieval", anchors=anchors)
-    _collect_anchors(route_results, origin="route", anchors=anchors)
+    _collect_anchors(
+        retrieval_results,
+        origin="retrieval",
+        anchors=anchors,
+        scope_project_id=scope_project_id,
+    )
+    _collect_anchors(
+        route_results,
+        origin="route",
+        anchors=anchors,
+        scope_project_id=scope_project_id,
+    )
 
     relationships: list[dict[str, Any]] = []
     dependency_seeds: list[str] = []
-    if include_dependencies and getattr(ctx, "symbol_graph", None) is not None:
+    if (
+        not scope_blocked
+        and include_dependencies
+        and getattr(ctx, "symbol_graph", None) is not None
+    ):
         dependency_seeds = _dependency_seed_candidates(
             normalized_symbols,
             route_results,
@@ -512,11 +572,26 @@ def explore_context_impl(
                     _diagnostic("dependency_unavailable", relationship["error"])
                 )
                 continue
+            relationship = dict(relationship)
+            relationship["context_scope"] = "dependency_context"
+            if scope_project_id is not None:
+                relationship["scope_project_id"] = scope_project_id
+                relationship["cross_project"] = any(
+                    isinstance(node, Mapping)
+                    and isinstance(node.get("project_id"), str)
+                    and node.get("project_id") != scope_project_id
+                    for node in relationship.get("nodes", ())
+                )
             relationships.append({"seed": seed, **relationship})
             nodes = relationship.get("nodes", [])
             if isinstance(nodes, list):
-                _collect_anchors(nodes, origin="dependency", anchors=anchors)
-    elif include_dependencies:
+                _collect_anchors(
+                    nodes,
+                    origin="dependency",
+                    anchors=anchors,
+                    scope_project_id=scope_project_id,
+                )
+    elif not scope_blocked and include_dependencies:
         diagnostics.append(
             _diagnostic(
                 "dependency_unavailable",
@@ -584,8 +659,25 @@ def explore_context_impl(
     retrieval_plan = (
         retrieval_response.get("plan") if retrieval_response is not None else None
     )
+    project_context = project_context_for_scope(
+        getattr(ctx, "symbol_graph", None),
+        scope.project_ids,
+        max_projects=20,
+        max_edges=100,
+    )
     response = {
+        "context_response_schema_version": 2,
         "query": normalized_query,
+        "scope": {
+            "status": scope.status,
+            "workspace_id": scope.workspace_id,
+            "project_ids": list(scope.project_ids[:20]),
+            "candidates": list(scope.candidates),
+            "complete": scope.complete,
+            "diagnostics": list(scope.diagnostics),
+            "project_id": scope_project_id,
+            "file_path": normalized_file_path or None,
+        },
         "plan": {
             "name": "composed_explore_v1",
             "budget": normalized_budget,
@@ -609,6 +701,7 @@ def explore_context_impl(
                 "response_measure": "mcp-call-result-json-utf8-v1",
             },
         },
+        "project_context": project_context,
         "source": source_identity,
         "summary": {
             "retrieval_hits": len(retrieval_results),

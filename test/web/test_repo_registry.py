@@ -5483,7 +5483,7 @@ def test_bundle_explains_schema_mismatch_without_advertising_codemap(
 
     def reject_old_graph(_path):
         raise ValueError(
-            "graph.pkl at /private/index has schema_version=4, expected 5. Rebuild."
+            "graph.pkl at /private/index has schema_version=4, expected 7. Rebuild."
         )
 
     monkeypatch.setattr(
@@ -5493,12 +5493,12 @@ def test_bundle_explains_schema_mismatch_without_advertising_codemap(
 
     assert bundle.info().capabilities["codemap"] is False
     assert bundle.graph_unavailable_note() == (
-        "Dependency graph uses schema 4, but this server requires schema 5. "
+        "Dependency graph uses schema 4, but this server requires schema 7. "
         "Rebuild symbol_graph for this repository."
     )
     assert bundle.code_graph() is None
     assert bundle.graph_unavailable_note() == (
-        "Dependency graph uses schema 4, but this server requires schema 5. "
+        "Dependency graph uses schema 4, but this server requires schema 7. "
         "Rebuild symbol_graph for this repository."
     )
     assert bundle.info().capabilities["codemap"] is False

@@ -310,7 +310,7 @@ def _compact_node(
         file_path = None
         start_line = None
         end_line = None
-    return QueriedNode(
+    payload = dict(
         node_name=display,
         type=info.get("type", ""),
         file=file_path,
@@ -320,6 +320,9 @@ def _compact_node(
         score=score,
         content=relation,
     )
+    if info.get("project_id") is not None:
+        payload["project_id"] = info["project_id"]
+    return QueriedNode(**payload)
 
 
 def _compact_reference(
@@ -342,7 +345,7 @@ def _compact_reference(
         if file_path and display_line is not None
         else label
     )
-    return QueriedNode(
+    payload = dict(
         node_name=label,
         type="reference",
         file=file_path,
@@ -352,6 +355,11 @@ def _compact_reference(
         score=1.0,
         content=f"reference to {target_label}",
     )
+    if source_vid is not None:
+        source = graph.get_node_info_by_id(source_vid) or {}
+        if source.get("project_id") is not None:
+            payload["project_id"] = source["project_id"]
+    return QueriedNode(**payload)
 
 
 def _dedupe_nodes(nodes: Iterable[QueriedNode], limit: int) -> list[QueriedNode]:

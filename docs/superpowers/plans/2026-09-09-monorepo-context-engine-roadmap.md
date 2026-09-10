@@ -47,9 +47,10 @@ can otherwise create missing typeless vertices. Architecture edges cannot have
 anchors. Overlay replacement deletes architecture vertices in reverse index
 order, rebuilds indexes, invalidates caches, and rechecks range indexes.
 
-`CodeGraph._SCHEMA_VERSION` is 6. This is deliberately distinct from
+`CodeGraph._SCHEMA_VERSION` is 7. Schema 7 adds bounded persisted workspace
+context and normalized manifest dependency evidence. This is deliberately distinct from
 `builder_schema`, `query_surface_schema_version`, and
-`workspace_enrichment_version`. Old graph schema 5 artifacts must fail with a
+`workspace_enrichment_version`. Old graph schema 6 artifacts must fail with a
 graph-schema-specific stale-cache error.
 
 ### Build and incremental ordering
@@ -118,8 +119,8 @@ MCP loads workspace metadata from the persisted symbol-graph entry and never
 rescans on cold start. It reports:
 
 - `available` when metadata and graph topology/architecture digests agree;
-- `unavailable` when a schema-6 graph has no workspace metadata (mixed old
-  manifest/graph generation);
+- `unavailable` when a schema-7 graph has no workspace metadata (source-only
+  graph or mixed manifest/graph generation);
 - an integrity error when metadata exists but graph digests disagree;
 - the normal stale graph-schema error for schema 5.
 
@@ -129,9 +130,9 @@ is unchanged in Phase 1a.
 ## Phase 1b — native workspace framing and project-aware queries
 
 Phase 1b consumes the persisted Phase 1a `graph.pkl`; it does not introduce a
-second graph store. Its contracts are independent: graph schema 6,
-workspace-enrichment version 1, FactBatchBuffer ABI/schema 2, query-surface
-schema 2, and retrieval builder schema 9 when ownership metadata is present.
+second graph store. Its contracts are independent: graph schema 7,
+workspace-enrichment version 2, FactBatchBuffer ABI/schema 2, source
+query-surface schema 1, and project query-surface schema 3.
 
 The Python graph remains the correctness path. The v2 compatibility frame
 extends vertex rows with project/workspace identity, paths, display/kind, and
@@ -140,11 +141,11 @@ anchors on workspace/project edges. FactBatchBuffer v1 is rejected with an
 explicit native-contract mismatch, while source-only query behavior retains
 its schema-1 receipt.
 
-The complete v2 query surface canonically frames source and architecture
-vertices/edges, including ownership and sharing metadata. Compiler receipts
-publish both source and complete-surface digests together with topology,
-metadata, and architecture digests. MCP cold loading validates those receipts
-without rescanning.
+The complete v3 project query surface canonically frames source and
+architecture vertices/edges, including ownership, sharing metadata, and
+normalized manifest evidence. Compiler receipts publish both source and
+project-surface digests together with topology, metadata, and architecture
+digests. MCP cold loading validates those receipts without rescanning.
 
 The MCP surface now provides bounded project dependency roll-ups,
 `find_projects_using`, and optional `project_id` filters for BM25, semantic,
@@ -167,7 +168,9 @@ Compiler tests must cover exactly-once multi-language enrichment, manifest
 add/delete/rename detection, manifest-only topology rebuilds, metadata-only
 updates without re-embedding, and no-op updates without an inventory walk.
 
-Graph persistence tests must cover schema 6 round trips, endpoint validation,
+Graph persistence tests must cover schema 7 round trips, schema-6 rejection,
+workspace-context validation, manifest-evidence ordering and digest changes,
+endpoint validation,
 anchored-edge rejection, architecture exclusion from ranges, and index
 rebuild after overlay removal. Source consumer fixtures must prove byte-
 identical source-only traversal, ROI, dependency, and retrieval results before
@@ -179,7 +182,7 @@ The implementation files are:
 
 - `codenib/graph/workspace_enrichment.py` — overlay construction, ownership,
   sharing, pruning, digests, summaries, and validation;
-- `codenib/graph/code_graph.py` — architecture mutation boundary and schema 6;
+- `codenib/graph/code_graph.py` — architecture mutation boundary and schema 7;
 - `codenib/compiler/index_builders.py` and `index_compiler.py` — full and
   incremental integration;
 - `codenib/workspace/` — manifest inventory, adapters, models, and scanner;

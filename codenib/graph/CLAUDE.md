@@ -17,8 +17,9 @@ validation; it does not create a second graph store. `roi_subgraph.py`,
   `depends_on_manifest`. Use the `NODE_TYPE_*` / `EDGE_TYPE_*` constants and
   predicates — never hard-code string literals.
 - **Persisted-graph schema is versioned.** `_SCHEMA_VERSION` in `code_graph.py`
-  is 6. `load_graph()` rejects mismatches, so pre-Phase-1a graph.pkl files
-  must be regenerated. Keep this name distinct from `builder_schema`,
+  is 7. `load_graph()` rejects mismatches, so pre-Phase-2 graph.pkl files
+  must be regenerated. Schema 7 persists bounded workspace context and
+  normalized manifest dependency evidence. Keep this name distinct from `builder_schema`,
   `query_surface_schema_version`, and `workspace_enrichment_version`.
 - **Architecture mutation is validated.** Use
   `CodeGraph.add_architecture_edge()` rather than `_add_edge()` for workspace

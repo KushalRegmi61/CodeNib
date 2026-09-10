@@ -23,8 +23,8 @@ from ._validation import (
     MAX_TOOL_RESULTS,
     bounded_integer,
     bounded_text,
-    required_text,
     optional_project_id,
+    required_text,
 )
 
 
@@ -119,7 +119,7 @@ def search_context_impl(
 
         graph = plan.graph
         candidates = expand_retrieval_candidates(
-            ExpandContext(code_graph=ctx.symbol_graph),
+            ExpandContext(code_graph=ctx.symbol_graph, project_id=project_id),
             candidates,
             seed_top_k=graph.seed_top_k,
             expand_top_k=graph.expand_top_k,
@@ -138,11 +138,26 @@ def search_context_impl(
             )
             owner = getattr(candidate, "project_id", None)
             if owner is None and graph_for_filter is not None:
-                vertex_id = graph_for_filter.name_to_vertex.get(candidate_id)
-                if vertex_id is not None:
-                    owner = graph_for_filter.graph.vs[vertex_id].attributes().get(
-                        "project_id"
-                    )
+                for value in (
+                    candidate_id,
+                    getattr(candidate, "node_name", None),
+                ):
+                    vertex_id = graph_for_filter.name_to_vertex.get(value)
+                    if vertex_id is not None:
+                        owner = (
+                            graph_for_filter.graph.vs[vertex_id]
+                            .attributes()
+                            .get("project_id")
+                        )
+                        break
+                if owner is None and getattr(candidate, "file", None):
+                    vertex_id = graph_for_filter.file_vertex_id(candidate.file)
+                    if vertex_id is not None:
+                        owner = (
+                            graph_for_filter.graph.vs[vertex_id]
+                            .attributes()
+                            .get("project_id")
+                        )
             if owner == project_id:
                 filtered_candidates.append(candidate)
         candidates = filtered_candidates

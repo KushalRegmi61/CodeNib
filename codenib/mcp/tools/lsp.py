@@ -18,6 +18,7 @@ from ._validation import (
     MAX_TOOL_RESULTS,
     bounded_integer,
     bounded_text,
+    optional_project_id,
 )
 
 
@@ -197,6 +198,7 @@ def lsp_route_impl(
     query: str = "",
     top_k: int = 12,
     include_neighbors: bool = True,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]] | dict[str, str]:
     """Return provider-backed route anchors for one or more symbol seeds."""
     top_k = bounded_integer(top_k, name="top_k", maximum=MAX_TOOL_RESULTS)
@@ -209,20 +211,51 @@ def lsp_route_impl(
     normalized_query = requested_query.strip()
     if not seeds and not normalized_query:
         return []
+    project_id = optional_project_id(project_id)
     provider = _lsp_provider(ctx)
     if provider is None:
         return {"error": "symbol_graph index not available"}
 
+    provider_top_k = top_k
+    if project_id is not None:
+        # The LSP provider protocol predates project filters. Over-fetch within
+        # the MCP bound, then apply ownership before the caller's final budget.
+        provider_top_k = min(MAX_TOOL_RESULTS, max(top_k, top_k * 4))
     try:
         results = provider.route(
             symbols=seeds,
             query=normalized_query or None,
-            top_k=top_k,
+            top_k=provider_top_k,
             include_neighbors=bool(include_neighbors),
         )
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
-    return _serialize_results(results)
+    serialized = _serialize_results(results)
+    if project_id is None or not isinstance(serialized, list):
+        return serialized
+    graph = getattr(ctx, "symbol_graph", None)
+    filtered = []
+    for result in serialized:
+        owner = result.get("project_id")
+        if owner is None and graph is not None:
+            for value in (
+                result.get("node_id"),
+                result.get("node_name"),
+                result.get("symbol"),
+            ):
+                if not value:
+                    continue
+                vertex_id = graph.name_to_vertex.get(value)
+                if vertex_id is not None:
+                    owner = graph.graph.vs[vertex_id].attributes().get("project_id")
+                    break
+            if owner is None and result.get("file"):
+                vertex_id = graph.file_vertex_id(result["file"])
+                if vertex_id is not None:
+                    owner = graph.graph.vs[vertex_id].attributes().get("project_id")
+        if owner == project_id:
+            filtered.append(result)
+    return filtered[:top_k]
 
 
 __all__ = [

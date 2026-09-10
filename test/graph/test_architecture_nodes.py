@@ -8,7 +8,14 @@ import pytest
 
 from codenib.graph.code_graph import CodeGraph
 from codenib.graph.layers import build_graph_layers
-from codenib.graph.workspace_enrichment import validate_workspace_graph
+from codenib.graph.workspace_enrichment import (
+    architecture_digest,
+    validate_workspace_graph,
+)
+from codenib.scip_interface.query_surface import (
+    project_query_surface_sha256,
+    source_query_surface_sha256,
+)
 from codenib.types import (
     DEPENDENCY_EDGE_TYPES,
     EDGE_TYPE_CONTAIN,
@@ -84,6 +91,7 @@ def test_file_vertex_id_survives_save_load_round_trip(tmp_path):
     graph.save_graph(str(path))
     loaded = CodeGraph.load_graph(str(path))
     assert loaded.file_vertex_id("a.py") == graph.file_vertex_id("a.py")
+    assert loaded.workspace_context is None
 
 
 def test_file_vertex_id_populated_by_merge_from():
@@ -128,6 +136,131 @@ def test_architecture_attributes_and_edges_survive_round_trip(tmp_path):
         is True
     )
     validate_workspace_graph(loaded)
+
+
+def test_manifest_edge_evidence_is_merged_and_survives_round_trip(tmp_path):
+    graph = CodeGraph("repo")
+    graph.add_architecture_vertex(
+        "project://apps/web",
+        {"type": NODE_TYPE_PROJECT, "project_id": "project://apps/web"},
+    )
+    graph.add_architecture_vertex(
+        "project://libs/shared",
+        {"type": NODE_TYPE_PROJECT, "project_id": "project://libs/shared"},
+    )
+    first = {
+        "declared_name": "@acme/shared",
+        "scope": "runtime",
+        "specifier": "workspace:^",
+        "source_manifest": "apps/web/package.json",
+        "resolution": "workspace",
+    }
+    second = {
+        **first,
+        "scope": "optional",
+        "source_manifest": "apps/web/package.json",
+    }
+    graph.add_architecture_edge(
+        "project://apps/web",
+        "project://libs/shared",
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
+        manifest_evidence=(first,),
+    )
+    graph.add_architecture_edge(
+        "project://apps/web",
+        "project://libs/shared",
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
+        manifest_evidence=(second, first),
+    )
+
+    edge = next(iter(graph.graph.es))
+    assert len(edge["manifest_evidence"]) == 2
+    digest = architecture_digest(graph)
+    context = {
+        "workspace_id": "workspace://repo",
+        "detected_systems": [],
+        "complete": True,
+        "topology_digest": "topology",
+        "metadata_digest": "metadata",
+        "architecture_digest": digest,
+        "project_count": 2,
+        "projects": [],
+        "diagnostics": [],
+        "query_surface_schema_version": 3,
+    }
+    path = tmp_path / "graph.pkl"
+    graph.save_graph(path, workspace_context=context)
+    loaded = CodeGraph.load_graph(path)
+
+    assert loaded.workspace_context == context
+    assert loaded.graph.es[0]["manifest_evidence"] == edge["manifest_evidence"]
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        graph.save_graph(path, workspace_context={"architecture_digest": digest})
+
+
+def test_manifest_evidence_is_rejected_on_containment_edges():
+    graph = CodeGraph("repo")
+    graph.add_architecture_vertex("workspace://root", {"type": NODE_TYPE_WORKSPACE})
+    graph.add_architecture_vertex("project://apps/web", {"type": NODE_TYPE_PROJECT})
+    with pytest.raises(ValueError, match="only valid"):
+        graph.add_architecture_edge(
+            "workspace://root",
+            "project://apps/web",
+            EDGE_TYPE_CONTAIN,
+            manifest_evidence=(
+                {
+                    "declared_name": "x",
+                    "scope": "runtime",
+                    "specifier": "*",
+                    "source_manifest": "package.json",
+                    "resolution": "workspace",
+                },
+            ),
+        )
+
+
+def test_manifest_evidence_changes_project_but_not_source_query_digest():
+    graph = CodeGraph("repo")
+    graph.add_file_node("src/app.py")
+    graph.add_architecture_vertex(
+        "workspace://root",
+        {
+            "type": NODE_TYPE_WORKSPACE,
+            "workspace_id": "workspace://root",
+            "workspace_path": ".",
+        },
+    )
+    for project_id, path in (
+        ("project://apps/web", "apps/web"),
+        ("project://libs/shared", "libs/shared"),
+    ):
+        graph.add_architecture_vertex(
+            project_id,
+            {
+                "type": NODE_TYPE_PROJECT,
+                "project_id": project_id,
+                "project_path": path,
+            },
+        )
+    graph.add_architecture_edge(
+        "project://apps/web",
+        "project://libs/shared",
+        EDGE_TYPE_MANIFEST_DEPENDENCY,
+    )
+    before = project_query_surface_sha256(graph)
+    source_before = source_query_surface_sha256(graph)
+    graph.graph.es[0]["manifest_evidence"] = (
+        {
+            "declared_name": "@acme/shared",
+            "scope": "runtime",
+            "specifier": "workspace:^",
+            "source_manifest": "apps/web/package.json",
+            "resolution": "workspace",
+        },
+    )
+    assert project_query_surface_sha256(graph) != before
+    assert source_query_surface_sha256(graph) == source_before
 
 
 def test_architecture_edge_rejects_missing_endpoints_before_add():

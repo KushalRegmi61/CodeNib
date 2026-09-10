@@ -8,7 +8,7 @@ import pickletools
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import igraph as ig
 
@@ -48,7 +48,126 @@ from ..types import (
 #     has_definition provenance; decoders may emit anchored import edges.
 # v6: persisted workspace/project vertices, project ownership attributes, and
 # architecture containment/manifest-dependency edges.
-_SCHEMA_VERSION = 6
+# v7: bounded workspace context plus normalized manifest dependency evidence.
+_SCHEMA_VERSION = 7
+
+_MANIFEST_EVIDENCE_FIELDS = (
+    "declared_name",
+    "scope",
+    "specifier",
+    "source_manifest",
+    "resolution",
+)
+_UNSET_WORKSPACE_CONTEXT = object()
+
+
+def _normalize_manifest_evidence(evidence: Any) -> tuple[dict[str, Any], ...]:
+    """Validate and deterministically normalize manifest edge evidence."""
+
+    if evidence is None:
+        return ()
+    if isinstance(evidence, Mapping):
+        evidence = (evidence,)
+    if isinstance(evidence, (str, bytes)):
+        raise ValueError("manifest_evidence must be a mapping or iterable of mappings")
+
+    normalized: dict[tuple[Any, ...], dict[str, Any]] = {}
+    try:
+        records = iter(evidence)
+    except TypeError as exc:
+        raise ValueError(
+            "manifest_evidence must be a mapping or iterable of mappings"
+        ) from exc
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("manifest evidence records must be mappings")
+        unknown = set(record) - set(_MANIFEST_EVIDENCE_FIELDS)
+        if unknown:
+            raise ValueError(
+                "manifest evidence contains unknown fields: "
+                + ", ".join(sorted(str(value) for value in unknown))
+            )
+        values: dict[str, Any] = {}
+        for evidence_field in _MANIFEST_EVIDENCE_FIELDS:
+            value = record.get(evidence_field)
+            if evidence_field == "specifier":
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(
+                        "manifest evidence specifier must be a string or None"
+                    )
+            elif not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"manifest evidence {evidence_field} must be a non-empty string"
+                )
+            values[evidence_field] = value
+        key = tuple(
+            values[evidence_field] for evidence_field in _MANIFEST_EVIDENCE_FIELDS
+        )
+        normalized[key] = values
+    return tuple(
+        normalized[key]
+        for key in sorted(
+            normalized, key=lambda value: tuple(item or "" for item in value)
+        )
+    )
+
+
+def _validate_workspace_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the bounded schema-7 workspace summary at the graph boundary."""
+
+    from ..scip_interface.query_surface import PROJECT_QUERY_SURFACE_SCHEMA_VERSION
+
+    required = {
+        "workspace_id": str,
+        "detected_systems": list,
+        "complete": bool,
+        "topology_digest": str,
+        "metadata_digest": str,
+        "architecture_digest": str,
+        "project_count": int,
+        "projects": list,
+        "diagnostics": list,
+        "query_surface_schema_version": int,
+    }
+    missing = sorted(key for key in required if key not in context)
+    if missing:
+        raise ValueError(
+            "schema-7 workspace_context is missing required fields: "
+            + ", ".join(missing)
+        )
+    for key, expected_type in required.items():
+        value = context[key]
+        if type(value) is not expected_type:
+            raise ValueError(
+                f"schema-7 workspace_context.{key} must be {expected_type.__name__}"
+            )
+    if not context["workspace_id"]:
+        raise ValueError("schema-7 workspace_context.workspace_id must be non-empty")
+    if any(type(system) is not str for system in context["detected_systems"]):
+        raise ValueError(
+            "schema-7 workspace_context.detected_systems must contain strings"
+        )
+    if any(not isinstance(project, Mapping) for project in context["projects"]):
+        raise ValueError("schema-7 workspace_context.projects must contain mappings")
+    if context["project_count"] < 0:
+        raise ValueError(
+            "schema-7 workspace_context.project_count must be non-negative"
+        )
+    if context["query_surface_schema_version"] != PROJECT_QUERY_SURFACE_SCHEMA_VERSION:
+        raise ValueError(
+            "schema-7 workspace_context.query_surface_schema_version must match "
+            f"{PROJECT_QUERY_SURFACE_SCHEMA_VERSION}"
+        )
+    for context_field in (
+        "topology_digest",
+        "metadata_digest",
+        "architecture_digest",
+    ):
+        if not context[context_field]:
+            raise ValueError(
+                f"schema-7 workspace_context.{context_field} must be non-empty"
+            )
+    return dict(context)
 
 
 def current_graph_schema_version() -> int:
@@ -154,6 +273,9 @@ class CodeGraph:
         self.current_file = None
         self.current_scope = None
         self.project_root = project_root
+        # Schema-7 workspace metadata is persisted alongside the igraph
+        # payload.  Source-only graphs intentionally keep this as ``None``.
+        self.workspace_context: Optional[dict[str, Any]] = None
         self.scope_stack = []  # List of {symbol: [start_line, end_line]} dicts
         # Store line ranges for symbols
         self.symbol_ranges = {}
@@ -419,7 +541,14 @@ class CodeGraph:
                 )
         return self._add_vertex(name, dict(attributes))
 
-    def add_architecture_edge(self, source_name, target_name, edge_type):
+    def add_architecture_edge(
+        self,
+        source_name,
+        target_name,
+        edge_type,
+        *,
+        manifest_evidence=None,
+    ):
         """Add one validated, anchor-free workspace/project edge.
 
         ``_add_edge`` intentionally creates missing vertices for decoder
@@ -440,6 +569,12 @@ class CodeGraph:
         source_type = source.get("type")
         target_type = target.get("type")
 
+        normalized_evidence = _normalize_manifest_evidence(manifest_evidence)
+        if edge_type != EDGE_TYPE_MANIFEST_DEPENDENCY and normalized_evidence:
+            raise ValueError(
+                "manifest evidence is only valid on manifest dependency edges"
+            )
+
         if edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY:
             valid = (
                 source_type == NODE_TYPE_PROJECT and target_type == NODE_TYPE_PROJECT
@@ -457,7 +592,12 @@ class CodeGraph:
                 f"{source_type!r} -[{edge_type}]-> {target_type!r}"
             )
 
-        return self._add_edge(source_name, target_name, edge_type)
+        edge_id = self._add_edge(source_name, target_name, edge_type)
+        if edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY and normalized_evidence:
+            existing = self.graph.es[edge_id].attributes().get("manifest_evidence", ())
+            merged = _normalize_manifest_evidence([*existing, *normalized_evidence])
+            self.graph.es[edge_id]["manifest_evidence"] = merged
+        return edge_id
 
     def iter_source_vertices(self):
         """Yield source vertices in persisted graph order."""
@@ -513,6 +653,9 @@ class CodeGraph:
             for vertex in self.graph.vs
             if isinstance(vertex.attributes().get("name"), str)
         }
+        # The context is an integrity-bound summary of this overlay.  Once the
+        # overlay is removed it must not be carried into a source-only save.
+        self.workspace_context = None
         self.rebuild_file_vertex_index()
         self.invalidate_caches()
         self._rebuild_edge_index()
@@ -959,7 +1102,9 @@ class CodeGraph:
         """Add a directory node to the graph"""
         self._add_vertex(dir_path, {"type": NODE_TYPE_DIRECTORY})
 
-    def save_graph(self, output_path):
+    def save_graph(
+        self, output_path, *, workspace_context=_UNSET_WORKSPACE_CONTEXT
+    ):
         """
         Save the graph to a pickle file for fast serialization.
 
@@ -967,6 +1112,13 @@ class CodeGraph:
             output_path: Path to save the pickle file
         """
         # Prepare data for pickling
+        if workspace_context is _UNSET_WORKSPACE_CONTEXT:
+            workspace_context = self.workspace_context
+        elif workspace_context is not None:
+            if not isinstance(workspace_context, Mapping):
+                raise ValueError("workspace_context must be a mapping or None")
+            workspace_context = _validate_workspace_context(workspace_context)
+
         data = {
             "schema_version": _SCHEMA_VERSION,
             "project_root": str(self.project_root) if self.project_root else None,
@@ -976,7 +1128,10 @@ class CodeGraph:
             "file_nodes": self._file_nodes,
             "file_edge_anchors": self._file_edge_anchors,
             "unified_to_names": self._unified_to_names,
+            "workspace_context": workspace_context,
         }
+
+        self.workspace_context = workspace_context
 
         with open(output_path, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -999,7 +1154,7 @@ class CodeGraph:
     def load_graph_stream(cls, handle, *, input_label="<authenticated stream>"):
         """Load a graph from a caller-authenticated binary stream.
 
-        The serialized schema is unchanged.  Runtime loaders use this entry
+        The serialized schema is schema-7.  Runtime loaders use this entry
         point after binding the bytes to the manifest receipt, so they never
         need to reopen an already-verified pathname before unpickling it.
         """
@@ -1024,6 +1179,36 @@ class CodeGraph:
         graph_instance._file_nodes = data.get("file_nodes", {})
         graph_instance._file_edge_anchors = data.get("file_edge_anchors", {})
         graph_instance._unified_to_names = data.get("unified_to_names", {})
+        workspace_context = data.get("workspace_context")
+        if workspace_context is not None:
+            if not isinstance(workspace_context, Mapping):
+                raise ValueError("schema-7 workspace_context must be a mapping or None")
+            workspace_context = _validate_workspace_context(workspace_context)
+        for edge in graph_instance.graph.es:
+            edge_type = edge.attributes().get("type")
+            evidence = edge.attributes().get("manifest_evidence")
+            if evidence is not None:
+                if edge_type != EDGE_TYPE_MANIFEST_DEPENDENCY:
+                    raise ValueError(
+                        "manifest evidence is only valid on manifest dependency edges"
+                    )
+                normalized = _normalize_manifest_evidence(evidence)
+                if tuple(evidence) != normalized:
+                    raise ValueError(
+                        "manifest evidence is not deterministically normalized"
+                    )
+        graph_instance.workspace_context = workspace_context
+        if workspace_context is not None and workspace_context.get(
+            "architecture_digest"
+        ):
+            from .workspace_enrichment import architecture_digest
+
+            observed_digest = architecture_digest(graph_instance)
+            if workspace_context["architecture_digest"] != observed_digest:
+                raise ValueError(
+                    "schema-7 workspace_context architecture_digest does not "
+                    "match the persisted graph"
+                )
         # The path index is derived from vertex attributes (same discipline as
         # unified_index()): rebuild it so loaded graphs answer file_vertex_id().
         graph_instance.rebuild_file_vertex_index()

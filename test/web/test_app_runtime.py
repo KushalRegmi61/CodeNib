@@ -1130,7 +1130,7 @@ def test_wiki_page_graph_reports_why_the_graph_is_unavailable(monkeypatch):
     bundle = SimpleNamespace(
         code_graph=lambda: None,
         graph_unavailable_note=lambda: (
-            "Dependency graph uses schema 4, but this server requires schema 5."
+            "Dependency graph uses schema 4, but this server requires schema 7."
         ),
     )
     monkeypatch.setattr(web_app, "_wiki", lambda _repo_id, _bundle=None: Builder())
@@ -1143,7 +1143,7 @@ def test_wiki_page_graph_reports_why_the_graph_is_unavailable(monkeypatch):
         "nodes": [],
         "edges": [],
         "mermaid": "",
-        "note": "Dependency graph uses schema 4, but this server requires schema 5.",
+        "note": "Dependency graph uses schema 4, but this server requires schema 7.",
     }
 
 

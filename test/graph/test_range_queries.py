@@ -348,4 +348,4 @@ def test_query_range_returns_range_query_result():
 
 
 def test_schema_version_constant_exposed():
-    assert _SCHEMA_VERSION == 6
+    assert _SCHEMA_VERSION == 7

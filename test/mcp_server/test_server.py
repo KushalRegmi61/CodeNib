@@ -178,13 +178,14 @@ def test_default_server_registers_complete_compatible_tool_set() -> None:
         "search_regex",
         "search_zoekt",
         "dependency_subgraph",
+        "find_projects_using",
         "lsp_definition",
         "lsp_references",
         "lsp_route",
         "read_source",
         "get_manifest",
     }
-    assert len(tools) == 12
+    assert len(tools) == 13
 
 
 def test_explore_tool_schema_is_bounded() -> None:

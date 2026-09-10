@@ -14,9 +14,10 @@ CODENIB_FULL_INSTRUCTIONS = (
 
 CODENIB_EXPLORE_INSTRUCTIONS = (
     "CodeNib provides one bounded repository exploration operation. Use "
-    "explore_context with a repository question and optional symbol seeds. "
-    "Inspect its plan, source identity, diagnostics, and session usage before "
-    "drawing conclusions."
+    "explore_context with a repository question, optional symbol seeds, and "
+    "file_path or project_id when the question is project-specific. Inspect "
+    "scope.status, scope.complete, project_context, source identity, "
+    "diagnostics, and session usage before drawing conclusions."
 )
 
 CODENIB_EXPLORE_GUIDE = """\
@@ -25,12 +26,17 @@ CODENIB_EXPLORE_GUIDE = """\
 Use `explore_context` for repository questions. It composes ranked retrieval,
 symbol routing, dependency expansion, and bounded source windows in one call.
 Provide a precise `query`; add `symbols` when you already know likely entry
-points. Start with `budget="balanced"`, use `budget="fast"` for orientation,
+points. Use `file_path` to resolve the owning project, or an exact `project_id`
+when the scope is known. Ambiguous project names are reported as candidates and
+are never guessed. Start with `budget="balanced"`, use `budget="fast"` for orientation,
 or `budget="thorough"` when the first result lacks enough relationships.
 
 Check `plan.route.provider` to see which navigation backend actually ran,
+`scope.status` and `scope.complete` before treating project rollups as complete,
 `source.verified` before treating excerpts as live checkout source, and
-`diagnostics` for independently unavailable capabilities. Within one stdio
+`diagnostics` for independently unavailable capabilities. Manifest dependency
+evidence is distinct from source relationships; cross-project source windows are
+labeled as dependency context. Within one stdio
 connection, identical verified ranges can become stable session pointers;
 the response summary reports retained ranges, deduplication, and evictions.
 """

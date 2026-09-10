@@ -19,7 +19,7 @@ from typing import Any
 from ..types import is_architecture_node
 
 QUERY_SURFACE_SCHEMA_VERSION = 1
-PROJECT_QUERY_SURFACE_SCHEMA_VERSION = 2
+PROJECT_QUERY_SURFACE_SCHEMA_VERSION = 3
 _MAGIC = b"CodeNib-FactQuery-Surface\0"
 _PROJECT_MAGIC = b"CodeNib-ProjectQuery-Surface\0"
 
@@ -69,6 +69,47 @@ def _optional_bool(value: object, *, label: str) -> bytes:
     if type(value) is not bool:
         raise ValueError(f"{label} must be a boolean")
     return b"\x02" if value else b"\x01"
+
+
+def _manifest_evidence_bytes(value: object, *, label: str) -> bytes:
+    """Frame normalized manifest evidence without relying on pickle ordering."""
+
+    if value is None:
+        return struct.pack(">Q", 0)
+    if not isinstance(value, (tuple, list)):
+        raise ValueError(f"{label} must be a tuple or list")
+    fields = (
+        "declared_name",
+        "scope",
+        "specifier",
+        "source_manifest",
+        "resolution",
+    )
+    rows = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"{label}[{index}] must be a mapping")
+        unknown = set(item) - set(fields)
+        if unknown:
+            raise ValueError(
+                f"{label}[{index}] contains unknown fields: "
+                + ", ".join(sorted(str(field) for field in unknown))
+            )
+        for field in fields:
+            field_value = item.get(field)
+            if field == "specifier":
+                valid = field_value is None or (type(field_value) is str)
+            else:
+                valid = type(field_value) is str and bool(field_value)
+            if not valid:
+                raise ValueError(f"{label}[{index}].{field} is invalid")
+        rows.append(tuple(item.get(field) for field in fields))
+    rows = sorted(set(rows), key=lambda row: tuple(value or "" for value in row))
+    encoded = bytearray(struct.pack(">Q", len(rows)))
+    for row in rows:
+        for value in row:
+            encoded.extend(_optional_string(value, label=f"{label}.field"))
+    return bytes(encoded)
 
 
 def _query_surface_sha256(graph: object, *, source_only: bool = False) -> str:
@@ -189,9 +230,7 @@ def _project_attributes(attrs: Mapping[str, Any], *, label: str) -> bytes:
         "display_name",
         "project_kind",
     ):
-        digest.extend(
-            _optional_string(attrs.get(field), label=f"{label}.{field}")
-        )
+        digest.extend(_optional_string(attrs.get(field), label=f"{label}.{field}"))
     for field in (
         "synthetic",
         "ownership_complete",
@@ -199,6 +238,8 @@ def _project_attributes(attrs: Mapping[str, Any], *, label: str) -> bytes:
         "is_shared",
     ):
         digest.extend(_optional_bool(attrs.get(field), label=f"{label}.{field}"))
+    for field in ("file_count", "symbol_count", "consumer_count"):
+        digest.extend(_optional_int(attrs.get(field), label=f"{label}.{field}"))
     return bytes(digest)
 
 
@@ -237,7 +278,7 @@ def _validate_project_vertex(attrs: Mapping[str, Any], *, label: str) -> None:
 def project_query_surface_sha256(graph: object) -> str:
     """Hash the complete workspace/project-aware graph surface.
 
-    The v1 source surface deliberately remains unchanged.  This v2 surface is
+    The v1 source surface deliberately remains unchanged.  This v3 surface is
     canonicalized by stable vertex/edge identity so a Python graph and a
     native overlay projection can independently produce the same receipt.
     """
@@ -255,7 +296,9 @@ def project_query_surface_sha256(graph: object) -> str:
             _validate_project_vertex(attrs, label=f"vertex[{index}]")
         vertex_rows.append((name, node_type, index, attrs))
     vertex_rows.sort(key=lambda row: (row[0], row[1], row[2]))
-    canonical_position = {index: position for position, (_, _, index, _) in enumerate(vertex_rows)}
+    canonical_position = {
+        index: position for position, (_, _, index, _) in enumerate(vertex_rows)
+    }
 
     digest = hashlib.sha256()
     digest.update(_PROJECT_MAGIC)
@@ -265,14 +308,22 @@ def project_query_surface_sha256(graph: object) -> str:
         digest.update(b"V")
         digest.update(_required_string(name, label=f"vertex[{position}].name"))
         digest.update(_required_string(node_type, label=f"vertex[{position}].type"))
-        digest.update(_optional_string(attrs.get("file"), label=f"vertex[{position}].file"))
+        digest.update(
+            _optional_string(attrs.get("file"), label=f"vertex[{position}].file")
+        )
         digest.update(_project_attributes(attrs, label=f"vertex[{position}]"))
         for field in ("start_line", "end_line", "selection_line"):
-            digest.update(_optional_int(attrs.get(field), label=f"vertex[{position}].{field}"))
+            digest.update(
+                _optional_int(attrs.get(field), label=f"vertex[{position}].{field}")
+            )
         for field in ("unified_name", "symbol_kind"):
-            digest.update(_optional_string(attrs.get(field), label=f"vertex[{position}].{field}"))
+            digest.update(
+                _optional_string(attrs.get(field), label=f"vertex[{position}].{field}")
+            )
         digest.update(
-            _optional_bool(attrs.get("has_definition"), label=f"vertex[{position}].has_definition")
+            _optional_bool(
+                attrs.get("has_definition"), label=f"vertex[{position}].has_definition"
+            )
         )
 
     edge_rows = []
@@ -303,15 +354,27 @@ def project_query_surface_sha256(graph: object) -> str:
                 and source_type == "project"
                 and target_type == "project"
             )
-            if not valid or attrs.get("anchor_file") is not None or attrs.get(
-                "anchor_line"
-            ) is not None:
+            if (
+                not valid
+                or attrs.get("anchor_file") is not None
+                or attrs.get("anchor_line") is not None
+            ):
                 raise ValueError(f"edge[{index}] is an invalid architecture edge")
+            if (
+                edge_type != "depends_on_manifest"
+                and attrs.get("manifest_evidence") is not None
+            ):
+                raise ValueError(
+                    f"edge[{index}] has manifest evidence on a non-manifest edge"
+                )
         elif edge_type != "reference" and (
-            attrs.get("anchor_file") is not None
-            or attrs.get("anchor_line") is not None
+            attrs.get("anchor_file") is not None or attrs.get("anchor_line") is not None
         ):
             raise ValueError(f"edge[{index}] has anchors on a non-reference edge")
+        elif attrs.get("manifest_evidence") is not None:
+            raise ValueError(
+                f"edge[{index}] has manifest evidence on a non-manifest edge"
+            )
         edge_rows.append(
             (
                 vertices[source]["name"],
@@ -319,10 +382,12 @@ def project_query_surface_sha256(graph: object) -> str:
                 edge_type,
                 attrs.get("anchor_file"),
                 attrs.get("anchor_line"),
+                attrs.get("manifest_evidence"),
                 canonical_position[source],
                 canonical_position[target],
             )
         )
+
     def optional_sort(value: object) -> tuple[int, object]:
         return (0, "") if value is None else (1, value)
 
@@ -333,8 +398,9 @@ def project_query_surface_sha256(graph: object) -> str:
             row[2],
             optional_sort(row[3]),
             optional_sort(row[4]),
-            row[5],
+            _manifest_evidence_bytes(row[5], label="edge.sort.manifest_evidence"),
             row[6],
+            row[7],
         )
     )
     digest.update(struct.pack(">Q", len(edge_rows)))
@@ -344,6 +410,7 @@ def project_query_surface_sha256(graph: object) -> str:
         edge_type,
         anchor_file,
         anchor_line,
+        manifest_evidence,
         _source_position,
         _target_position,
     ) in enumerate(edge_rows):
@@ -351,8 +418,16 @@ def project_query_surface_sha256(graph: object) -> str:
         digest.update(_required_string(source_name, label=f"edge[{position}].source"))
         digest.update(_required_string(target_name, label=f"edge[{position}].target"))
         digest.update(_required_string(edge_type, label=f"edge[{position}].type"))
-        digest.update(_optional_string(anchor_file, label=f"edge[{position}].anchor_file"))
+        digest.update(
+            _optional_string(anchor_file, label=f"edge[{position}].anchor_file")
+        )
         digest.update(_optional_int(anchor_line, label=f"edge[{position}].anchor_line"))
+        digest.update(
+            _manifest_evidence_bytes(
+                manifest_evidence,
+                label=f"edge[{position}].manifest_evidence",
+            )
+        )
     return digest.hexdigest()
 
 

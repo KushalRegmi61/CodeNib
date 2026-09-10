@@ -228,6 +228,7 @@ def test_native_lsp_result_normalization_is_stable_and_deduplicated():
             "end_line": 2,
             "score": 1.0,
             "content": "lsp references",
+            "project_id": None,
         },
         {
             "node_name": "z.py:9",
@@ -238,6 +239,7 @@ def test_native_lsp_result_normalization_is_stable_and_deduplicated():
             "end_line": 8,
             "score": 1.0,
             "content": "lsp references",
+            "project_id": None,
         },
     ]
 

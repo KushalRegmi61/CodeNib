@@ -115,6 +115,7 @@ def _constrain_and_save_selected_graph(
     output_dir: str,
     source_selection: RepositorySourceSelection,
     post_selection_hook: Optional[Callable[[Any], None]] = None,
+    pre_save_hook: Optional[Callable[[Any], Optional[Dict[str, Any]]]] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Apply the central graph gate, then publish graph and occurrence views."""
 
@@ -131,7 +132,14 @@ def _constrain_and_save_selected_graph(
     if post_selection_hook is not None:
         post_selection_hook(graph)
 
-    graph.save_graph(os.path.join(output_dir, "graph.pkl"))
+    workspace_context = pre_save_hook(graph) if pre_save_hook is not None else None
+    graph_path = os.path.join(output_dir, "graph.pkl")
+    if workspace_context is None:
+        # Preserve the legacy no-op call shape and let CodeGraph retain an
+        # already-loaded context when incremental work has nothing to enrich.
+        graph.save_graph(graph_path)
+    else:
+        graph.save_graph(graph_path, workspace_context=workspace_context)
     occurrence_index = getattr(graph, "lsp_occurrence_index", None)
     lsp_occurrence_artifact = None
     if occurrence_index is not None:
@@ -2256,7 +2264,9 @@ class SymbolGraphBuilder:
                 **coverage_report,
             }
 
+        from ..graph.code_graph import current_graph_schema_version
         from ..graph.workspace_enrichment import (
+            WORKSPACE_ENRICHMENT_VERSION,
             enrich_graph_with_workspace,
             finalize_workspace_result,
             prune_orphaned_architecture,
@@ -2269,6 +2279,15 @@ class SymbolGraphBuilder:
             source_selection=source_selection,
             workspace_model=kwargs.get("workspace_model"),
         )
+
+        def finalize_selected_graph(selected_graph):
+            nonlocal workspace_result
+            workspace_result = finalize_workspace_result(
+                selected_graph, workspace_result
+            )
+            validate_workspace_graph(selected_graph, workspace_result.workspace_summary)
+            return workspace_result.workspace_summary
+
         (
             source_selection_report,
             lsp_occurrence_artifact,
@@ -2279,9 +2298,8 @@ class SymbolGraphBuilder:
             post_selection_hook=lambda selected_graph: prune_orphaned_architecture(
                 selected_graph, workspace_result.model
             ),
+            pre_save_hook=finalize_selected_graph,
         )
-        workspace_result = finalize_workspace_result(graph, workspace_result)
-        validate_workspace_graph(graph, workspace_result.workspace_summary)
 
         graph_output_path = os.path.join(output_dir, "graph.pkl")
         graph_output_receipt = {
@@ -2337,8 +2355,8 @@ class SymbolGraphBuilder:
                 "lsp_occurrence_artifact": lsp_occurrence_artifact,
                 "query_surface_sha256": observed_query_surface,
                 "workspace": workspace_result.workspace_summary,
-                "graph_schema_version": 6,
-                "workspace_enrichment_version": 1,
+                "graph_schema_version": current_graph_schema_version(),
+                "workspace_enrichment_version": WORKSPACE_ENRICHMENT_VERSION,
                 "topology_digest": workspace_result.topology_digest,
                 "metadata_digest": workspace_result.metadata_digest,
                 "architecture_digest": workspace_result.architecture_digest,
@@ -2492,7 +2510,9 @@ class SymbolGraphBuilder:
         graph_languages = self.languages or [self.language]
         head = _git_output(repo_path, "rev-parse", "HEAD")
 
+        from ..graph.code_graph import current_graph_schema_version
         from ..graph.workspace_enrichment import (
+            WORKSPACE_ENRICHMENT_VERSION,
             enrich_graph_with_workspace,
             finalize_workspace_result,
             prune_orphaned_architecture,
@@ -2618,6 +2638,16 @@ class SymbolGraphBuilder:
                 workspace_model=workspace_model,
             )
 
+        def finalize_selected_graph(selected_graph):
+            nonlocal workspace_result
+            if workspace_result is None:
+                return None
+            workspace_result = finalize_workspace_result(
+                selected_graph, workspace_result
+            )
+            validate_workspace_graph(selected_graph, workspace_result.workspace_summary)
+            return workspace_result.workspace_summary
+
         (
             source_selection_report,
             lsp_occurrence_artifact,
@@ -2634,10 +2664,8 @@ class SymbolGraphBuilder:
                 if workspace_result is not None
                 else None
             ),
+            pre_save_hook=finalize_selected_graph,
         )
-        if workspace_result is not None:
-            workspace_result = finalize_workspace_result(graph, workspace_result)
-            validate_workspace_graph(graph, workspace_result.workspace_summary)
         elapsed = time.monotonic() - start
         node_count = len(graph.graph.vs)
         return IndexStatus(
@@ -2662,8 +2690,8 @@ class SymbolGraphBuilder:
                 **(
                     {
                         "workspace": workspace_result.workspace_summary,
-                        "graph_schema_version": 6,
-                        "workspace_enrichment_version": 1,
+                        "graph_schema_version": current_graph_schema_version(),
+                        "workspace_enrichment_version": WORKSPACE_ENRICHMENT_VERSION,
                         "topology_digest": workspace_result.topology_digest,
                         "metadata_digest": workspace_result.metadata_digest,
                         "architecture_digest": workspace_result.architecture_digest,

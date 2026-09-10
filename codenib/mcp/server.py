@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from ..compiler.manifest import RepoManifest
@@ -39,6 +40,7 @@ from .prompts import (
     CODENIB_FULL_INSTRUCTIONS,
     CODENIB_GUIDE,
 )
+from .schemas import ExploreResponse
 from .tool_surface import (
     TOOL_SURFACE_EXPLORE,
     TOOL_SURFACE_FULL,
@@ -105,6 +107,7 @@ _RouteSymbols = Annotated[
     Field(max_length=MAX_ROUTE_SYMBOLS),
 ]
 _SourcePath = Annotated[str, Field(min_length=1, max_length=MAX_SOURCE_PATH_CHARS)]
+_ExploreFilePath = Annotated[str, Field(max_length=MAX_SOURCE_PATH_CHARS)]
 _ExploreTopK = Annotated[int, Field(ge=1, le=MAX_EXPLORE_WINDOWS)]
 _ExploreBudget = Literal["fast", "balanced", "thorough"]
 
@@ -204,6 +207,13 @@ async def _wait_for_abandoned_explore_worker(
         "windows. Returns the concrete provider plan, source identity, independent "
         "diagnostics, and per-connection delivery usage."
     ),
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+    structured_output=True,
 )
 async def explore_context(
     query: _SearchQuery,
@@ -214,7 +224,8 @@ async def explore_context(
     include_dependencies: bool = True,
     filter_test: bool = False,
     project_id: str = "",
-) -> dict[str, Any]:
+    file_path: _ExploreFilePath = "",
+) -> ExploreResponse:
     """Compose repository context and commit delivery history atomically."""
 
     ctx = get_context()
@@ -233,6 +244,7 @@ async def explore_context(
                 include_dependencies,
                 filter_test,
                 project_id or None,
+                file_path,
             )
         )
         try:
@@ -250,7 +262,10 @@ async def explore_context(
                 )
             )
             raise
-        return runtime.ledger.project(response)
+        validated = ExploreResponse.model_validate(runtime.ledger.project(response))
+        # Return a plain mapping for legacy in-process callers while the
+        # annotation supplies the MCP structured-output schema.
+        return validated.model_dump()
 
 
 @mcp.tool(
@@ -594,13 +609,12 @@ async def get_manifest() -> dict[str, Any]:
         # Python is the correctness path in Phase 1b; the existing native
         # provider has no digest-verified overlay merge boundary yet.
         workspace.setdefault("native_project_queries", "unavailable")
-        bm25_available = bool(
-            getattr(_ctx.bm25, "project_filter_available", False)
+        bm25_available = bool(getattr(_ctx.bm25, "project_filter_available", False))
+        vector_available = (
+            any(_ctx.vector.project_filter_available(level) for level in ("l0", "l2"))
+            if _ctx.vector is not None
+            else False
         )
-        vector_available = any(
-            _ctx.vector.project_filter_available(level)
-            for level in ("l0", "l2")
-        ) if _ctx.vector is not None else False
         retrieval_available = bm25_available or vector_available
         workspace.setdefault(
             "project_retrieval",

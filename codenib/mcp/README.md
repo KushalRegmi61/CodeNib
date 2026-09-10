@@ -118,14 +118,27 @@ expansion, and verified live-source reads into one bounded response.
   neighborhoods when a symbol graph is available.
 - `filter_test` (bool, default `false`): exclude test files from retrieval
   branches that support the filter.
+- `project_id` (str, default `""`): exact `project://...` scope. Invalid or
+  unknown explicit scopes fail closed with a diagnostic.
+- `file_path` (str, default `""`): repository-relative POSIX path used to
+  resolve the owning project by longest matching project path.
 
-The response groups source windows by file and includes the concrete retrieval
-and route plan, provider metadata, dependency relationships, source identity,
-and a usage summary. Retrieval, routing, dependency expansion, and source reads
+The response has `context_response_schema_version=2`, a `scope` section, and a
+bounded `project_context` section containing project summaries, source rollups,
+and manifest dependency evidence. The response groups source windows by file and
+includes the concrete retrieval and route plan, provider metadata, dependency
+relationships, source identity, and a usage summary. Retrieval, routing, dependency expansion, and source reads
 degrade independently: an unavailable or failed provider is reported in
 `diagnostics` instead of being silently relabeled as another backend. When the
 checkout cannot be verified, indexed excerpts or locations are explicitly
 marked `verified: false`; they are not presented as live source.
+
+Project scope resolution is deterministic: explicit `project_id`, then
+`file_path` ownership, then a unique exact project path/display name, then
+workspace scope. Ambiguous names and unresolved paths include diagnostics and
+candidate summaries rather than selecting a project heuristically. Source
+relationships use source dependency edges; manifest relationships include
+normalized declaration evidence when available.
 
 #### Result and connection bounds
 

@@ -882,7 +882,9 @@ class ServerContext:
             from ..graph.workspace_enrichment import validate_workspace_graph
 
             self.symbol_graph = load_authenticated_graph_artifact(entry)
-            workspace_summary = entry.metadata.get("workspace")
+            workspace_summary = getattr(
+                self.symbol_graph, "workspace_context", None
+            ) or entry.metadata.get("workspace")
             if workspace_summary is None:
                 self.workspace_status = {
                     "status": "unavailable",

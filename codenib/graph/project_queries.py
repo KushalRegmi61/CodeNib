@@ -20,9 +20,9 @@ from typing import Any
 from ..types import (
     EDGE_TYPE_MANIFEST_DEPENDENCY,
     SOURCE_DEPENDENCY_EDGE_TYPES,
-    is_architecture_node,
     is_source_node,
 )
+from ..workspace.models import canonical_relative_path
 from .code_graph import CodeGraph
 
 
@@ -42,6 +42,27 @@ class ProjectQueryResult:
     diagnostics: tuple[dict[str, object], ...]
     complete: bool
     backend: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectScopeResolution:
+    """Deterministic project scope selected from persisted graph metadata."""
+
+    status: str
+    workspace_id: str | None
+    project_ids: tuple[str, ...]
+    candidates: tuple[dict[str, Any], ...]
+    complete: bool
+    diagnostics: tuple[dict[str, Any], ...]
+
+    @property
+    def single_project_id(self) -> str | None:
+        if (
+            self.status in {"explicit", "file_owner", "unique_name"}
+            and len(self.project_ids) == 1
+        ):
+            return self.project_ids[0]
+        return None
 
 
 def _vertex(graph: CodeGraph, name: str) -> Mapping[str, Any] | None:
@@ -78,8 +99,181 @@ def _project_payload(
         "is_shared": attributes.get("is_shared", False),
         "ownership_complete": attributes.get("ownership_complete"),
         "sharing_complete": attributes.get("sharing_complete"),
+        "file_count": attributes.get("file_count", 0),
+        "symbol_count": attributes.get("symbol_count", 0),
+        "consumer_count": attributes.get("consumer_count", 0),
         "depth": depth,
     }
+
+
+def _project_summaries(graph: CodeGraph) -> list[dict[str, Any]]:
+    projects = []
+    for vertex in graph.iter_architecture_vertices():
+        attrs = vertex.attributes()
+        if attrs.get("type") != "project":
+            continue
+        project_id = attrs.get("project_id", attrs.get("name"))
+        if not isinstance(project_id, str):
+            continue
+        projects.append(_project_payload(graph, project_id, depth=0))
+    return sorted(projects, key=lambda item: item["project_id"])
+
+
+def resolve_project_scope(
+    graph: CodeGraph | None,
+    *,
+    project_id: str = "",
+    file_path: str = "",
+    query: str = "",
+) -> ProjectScopeResolution:
+    """Resolve one deterministic project scope without rescanning the repo."""
+
+    if graph is None or not hasattr(graph, "iter_architecture_vertices"):
+        return ProjectScopeResolution(
+            status="unavailable",
+            workspace_id=None,
+            project_ids=(),
+            candidates=(),
+            complete=False,
+            diagnostics=(
+                {
+                    "kind": "workspace_metadata_unavailable",
+                    "message": "symbol graph is not loaded",
+                },
+            ),
+        )
+
+    workspace_id = None
+    for vertex in graph.iter_architecture_vertices():
+        attrs = vertex.attributes()
+        if attrs.get("type") == "workspace":
+            workspace_id = attrs.get("workspace_id", attrs.get("name"))
+            break
+    if not isinstance(workspace_id, str) or not workspace_id:
+        return ProjectScopeResolution(
+            status="unavailable",
+            workspace_id=None,
+            project_ids=(),
+            candidates=(),
+            complete=False,
+            diagnostics=(
+                {
+                    "kind": "workspace_metadata_unavailable",
+                    "message": "workspace overlay is absent",
+                },
+            ),
+        )
+    candidates = _project_summaries(graph)
+    by_id = {item["project_id"]: item for item in candidates}
+    diagnostics: list[dict[str, Any]] = []
+
+    normalized_project_id = (project_id or "").strip()
+    if normalized_project_id:
+        if normalized_project_id not in by_id:
+            diagnostics.append(
+                {"kind": "project_not_found", "project_id": normalized_project_id}
+            )
+            return ProjectScopeResolution(
+                "unresolved",
+                workspace_id,
+                (),
+                tuple(candidates[:20]),
+                False,
+                tuple(diagnostics),
+            )
+        selected = by_id[normalized_project_id]
+        return ProjectScopeResolution(
+            "explicit",
+            workspace_id,
+            (normalized_project_id,),
+            (selected,),
+            _complete_for_project(graph, normalized_project_id),
+            (),
+        )
+
+    normalized_file_path = (file_path or "").strip()
+    if normalized_file_path:
+        try:
+            normalized_file_path = canonical_relative_path(normalized_file_path)
+        except ValueError as exc:
+            return ProjectScopeResolution(
+                "unresolved",
+                workspace_id,
+                (),
+                (),
+                False,
+                ({"kind": "invalid_file_path", "message": str(exc)},),
+            )
+
+        def owns_path(project_path: object) -> bool:
+            if not isinstance(project_path, str):
+                return False
+            if project_path == ".":
+                return True
+            return (
+                normalized_file_path == project_path
+                or normalized_file_path.startswith(project_path.rstrip("/") + "/")
+            )
+
+        matches = [item for item in candidates if owns_path(item.get("project_path"))]
+        if matches:
+            matches.sort(
+                key=lambda item: (
+                    len(str(item.get("project_path", ""))),
+                    item["project_id"],
+                ),
+                reverse=True,
+            )
+            selected = matches[0]
+            return ProjectScopeResolution(
+                "file_owner",
+                workspace_id,
+                (selected["project_id"],),
+                (selected,),
+                bool(selected.get("ownership_complete", True)),
+                (),
+            )
+        diagnostics.append(
+            {"kind": "file_owner_not_found", "file_path": normalized_file_path}
+        )
+
+    normalized_query = (query or "").strip()
+    if normalized_query:
+        name_matches = [
+            item
+            for item in candidates
+            if normalized_query
+            in {item.get("project_path"), item.get("display_name"), item["project_id"]}
+        ]
+        if len(name_matches) == 1:
+            selected = name_matches[0]
+            return ProjectScopeResolution(
+                "unique_name",
+                workspace_id,
+                (selected["project_id"],),
+                (selected,),
+                _complete_for_project(graph, selected["project_id"]),
+                tuple(diagnostics),
+            )
+        if len(name_matches) > 1:
+            diagnostics.append({"kind": "ambiguous_project", "query": normalized_query})
+            return ProjectScopeResolution(
+                "ambiguous",
+                workspace_id,
+                (),
+                tuple(name_matches[:20]),
+                False,
+                tuple(diagnostics),
+            )
+
+    return ProjectScopeResolution(
+        "workspace",
+        workspace_id,
+        tuple(item["project_id"] for item in candidates),
+        tuple(candidates[:20]),
+        all(_complete_for_project(graph, item["project_id"]) for item in candidates),
+        tuple(diagnostics),
+    )
 
 
 def _edge_key(source: str, target: str, edge_type: str) -> tuple[str, str, str]:
@@ -123,6 +317,80 @@ def _complete_for_project(graph: CodeGraph, project_id: str) -> bool:
         attributes.get("ownership_complete", True)
         and attributes.get("sharing_complete", True)
     )
+
+
+def project_context_for_scope(
+    graph: CodeGraph | None,
+    project_ids: Iterable[str],
+    *,
+    max_projects: int = 20,
+    max_edges: int = 100,
+) -> dict[str, Any]:
+    """Return bounded persisted project and manifest context for MCP output."""
+
+    if graph is None or not hasattr(graph, "iter_architecture_vertices"):
+        return {
+            "projects": [],
+            "manifest_dependencies": [],
+            "source_rollups": [],
+            "complete": False,
+            "truncated": False,
+            "diagnostics": [{"kind": "workspace_metadata_unavailable"}],
+        }
+    selected = list(dict.fromkeys(str(value) for value in project_ids if value))
+    if not selected:
+        selected = [item["project_id"] for item in _project_summaries(graph)]
+    truncated = len(selected) > max(1, int(max_projects))
+    selected = selected[: max(1, int(max_projects))]
+    allowed = set(selected)
+    projects = [
+        _project_payload(graph, project_id, depth=0)
+        for project_id in selected
+        if _project_vertex(graph, project_id) is not None
+    ]
+    dependencies: list[dict[str, Any]] = []
+    for edge in graph.graph.es:
+        attrs = edge.attributes()
+        if attrs.get("type") != EDGE_TYPE_MANIFEST_DEPENDENCY:
+            continue
+        source = graph.graph.vs[edge.source]["name"]
+        target = graph.graph.vs[edge.target]["name"]
+        if source not in allowed and target not in allowed:
+            continue
+        dependencies.append(
+            {
+                "source": source,
+                "target": target,
+                "type": EDGE_TYPE_MANIFEST_DEPENDENCY,
+                "evidence": list(attrs.get("manifest_evidence", ())),
+            }
+        )
+    if len(dependencies) > max(1, int(max_edges)):
+        dependencies = dependencies[: max(1, int(max_edges))]
+        truncated = True
+    complete = all(
+        _complete_for_project(graph, item["project_id"]) for item in projects
+    )
+    context = getattr(graph, "workspace_context", None)
+    if isinstance(context, Mapping):
+        complete = complete and bool(context.get("complete", False))
+    return {
+        "projects": projects,
+        "manifest_dependencies": dependencies,
+        "source_rollups": [
+            {
+                "project_id": item["project_id"],
+                "file_count": item.get("file_count", 0),
+                "symbol_count": item.get("symbol_count", 0),
+                "consumer_count": item.get("consumer_count", 0),
+                "is_shared": item.get("is_shared", False),
+            }
+            for item in projects
+        ],
+        "complete": complete,
+        "truncated": truncated,
+        "diagnostics": [],
+    }
 
 
 def project_dependency_subgraph(
@@ -253,7 +521,12 @@ def project_dependency_subgraph(
         if source_name == target_name:
             continue
         key = _edge_key(source_name, target_name, EDGE_TYPE_MANIFEST_DEPENDENCY)
-        edge_evidence.setdefault(key, []).append({"manifest": True})
+        edge_evidence.setdefault(key, []).append(
+            {
+                "manifest": True,
+                "evidence": edge.attributes().get("manifest_evidence", ()),
+            }
+        )
 
     ordered_projects = sorted(
         project_ids,
@@ -356,8 +629,9 @@ def find_projects_using(
                         "target_node": canonical,
                     }
                 )
-        elif edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY and edge.target == graph.name_to_vertex.get(
-            target_project
+        elif (
+            edge_type == EDGE_TYPE_MANIFEST_DEPENDENCY
+            and edge.target == graph.name_to_vertex.get(target_project)
         ):
             source_project = graph.graph.vs[edge.source]["name"]
             if source_project != target_project:
@@ -369,6 +643,9 @@ def find_projects_using(
                         "edge_type": edge_type,
                         "source_node": None,
                         "target_node": target_project,
+                        "manifest_evidence": edge.attributes().get(
+                            "manifest_evidence", ()
+                        ),
                     }
                 )
 
@@ -404,6 +681,9 @@ def find_projects_using(
 __all__ = [
     "ProjectEvidence",
     "ProjectQueryResult",
+    "ProjectScopeResolution",
     "find_projects_using",
     "project_dependency_subgraph",
+    "project_context_for_scope",
+    "resolve_project_scope",
 ]

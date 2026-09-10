@@ -49,6 +49,7 @@ class DepNode:
     line: Optional[int]
     kind: str
     depth: int
+    project_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,6 +58,7 @@ class DepNode:
             "line": self.line,
             "kind": self.kind,
             "depth": self.depth,
+            "project_id": self.project_id,
         }
 
 
@@ -307,6 +309,7 @@ class DependencyAnalyzer:
             line=info.get("start_line") if has_source else None,
             kind=info.get("type", ""),
             depth=depth,
+            project_id=info.get("project_id"),
         )
 
     def _names_for_ids(self, vids: List[int]) -> List[str]:

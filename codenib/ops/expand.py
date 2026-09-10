@@ -36,6 +36,7 @@ class ExpandContext:
     default_method: str = "bfs"
     default_damping: float = 0.85
     filter_tests: bool = True
+    project_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -48,18 +49,19 @@ def nodeinfo_to_queried(nodes: List[NodeInfo]) -> List[QueriedNode]:
     results: List[QueriedNode] = []
     for rank, ni in enumerate(nodes):
         score = ni.score if ni.score is not None else 1.0 / (rank + 1)
-        results.append(
-            QueriedNode(
-                node_name=ni.node_name,
-                type=ni.type,
-                file=ni.file,
-                node_id=ni.node_id or ni.node_name,
-                start_line=ni.start_line,
-                end_line=ni.end_line,
-                score=score,
-                content=ni.content,
-            )
+        payload = dict(
+            node_name=ni.node_name,
+            type=ni.type,
+            file=ni.file,
+            node_id=ni.node_id or ni.node_name,
+            start_line=ni.start_line,
+            end_line=ni.end_line,
+            score=score,
+            content=ni.content,
         )
+        if ni.project_id is not None:
+            payload["project_id"] = ni.project_id
+        results.append(QueriedNode(**payload))
     return results
 
 
@@ -163,6 +165,8 @@ def expand_graph_neighbors(
             )
             if node is None:
                 continue
+            if context.project_id is not None and node.project_id != context.project_id:
+                continue
             if symbol_only and not is_symbol_node(node.type):
                 continue
             if require_span and (
@@ -237,6 +241,12 @@ def expand_graph_region(
             filter_tests=context.filter_tests,
         )[:top_k]
 
+    if context.project_id is not None:
+        nodes = [
+            node
+            for node in nodes
+            if _node_project_id(graph, node) == context.project_id
+        ]
     expanded = nodeinfo_to_queried(nodes)
     if include_content:
         expanded = hydrate_candidate_contents(expanded, repo_path=repo_path)
@@ -286,7 +296,14 @@ def expand_retrieval_candidates(
         repo_path=repo_path,
         include_content=include_content,
     )
-    return dedup_queried_nodes([*graph_seeds, *expanded])[:expand_top_k]
+    combined = dedup_queried_nodes([*graph_seeds, *expanded])
+    if context.project_id is not None:
+        combined = [
+            candidate
+            for candidate in combined
+            if _queried_project_id(context.code_graph, candidate) == context.project_id
+        ]
+    return combined[:expand_top_k]
 
 
 def _expand_neighbor_fallback(
@@ -341,6 +358,29 @@ def _resolve_seed(graph: CodeGraph, seed: QueriedNode) -> Optional[str]:
     return None
 
 
+def _node_project_id(graph: CodeGraph, node: NodeInfo) -> str | None:
+    project_id = getattr(node, "project_id", None)
+    if project_id:
+        return project_id
+    for value in (node.node_id, node.node_name):
+        if not value:
+            continue
+        vertex_id = graph.name_to_vertex.get(value)
+        if vertex_id is not None:
+            return graph.graph.vs[vertex_id].attributes().get("project_id")
+    if node.file:
+        vertex_id = graph.file_vertex_id(node.file)
+        if vertex_id is not None:
+            return graph.graph.vs[vertex_id].attributes().get("project_id")
+    return None
+
+
+def _queried_project_id(graph: CodeGraph | None, node: QueriedNode) -> str | None:
+    if graph is None:
+        return getattr(node, "project_id", None)
+    return _node_project_id(graph, node)
+
+
 def _neighbor_to_queried(
     graph: CodeGraph,
     vertex_id: int,
@@ -371,7 +411,7 @@ def _neighbor_to_queried(
             start_line=start_line,
             end_line=end_line,
         )
-    return QueriedNode(
+    payload = dict(
         node_name=display,
         type=info.get("type", ""),
         file=file_path,
@@ -381,6 +421,9 @@ def _neighbor_to_queried(
         score=float(score) * score_scale,
         content=content,
     )
+    if info.get("project_id") is not None:
+        payload["project_id"] = info["project_id"]
+    return QueriedNode(**payload)
 
 
 def _node_id(file_path: Optional[str], display: str) -> str:

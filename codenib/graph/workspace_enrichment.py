@@ -33,7 +33,7 @@ from ..workspace.resolver import ProjectPathTrie
 from ..workspace.scanner import scan_workspace
 from .code_graph import CodeGraph
 
-WORKSPACE_ENRICHMENT_VERSION = 1
+WORKSPACE_ENRICHMENT_VERSION = 2
 MAX_PROJECT_SUMMARIES = 100
 MAX_DIAGNOSTICS = 100
 
@@ -155,6 +155,9 @@ def architecture_digest(graph: CodeGraph) -> str:
                     "is_shared",
                     "ownership_complete",
                     "sharing_complete",
+                    "file_count",
+                    "symbol_count",
+                    "consumer_count",
                 )
                 if key in attrs
             }
@@ -167,6 +170,7 @@ def architecture_digest(graph: CodeGraph) -> str:
                 "source": source["name"],
                 "target": target["name"],
                 "type": edge.attributes().get("type"),
+                "manifest_evidence": edge.attributes().get("manifest_evidence", ()),
             }
         )
     return digest_json(
@@ -414,9 +418,12 @@ def _summary(
     ]
     all_diagnostics = list(model.diagnostics) + list(diagnostics)
     from ..scip_interface.query_surface import (
+        PROJECT_QUERY_SURFACE_SCHEMA_VERSION,
+        QUERY_SURFACE_SCHEMA_VERSION,
         project_query_surface_sha256,
         source_query_surface_sha256,
     )
+
     project_summaries = [
         {
             "project_id": attrs.get("project_id", attrs.get("name")),
@@ -425,6 +432,7 @@ def _summary(
             "is_shared": attrs.get("is_shared", False),
             "file_count": attrs.get("file_count", 0),
             "symbol_count": attrs.get("symbol_count", 0),
+            "consumer_count": attrs.get("consumer_count", 0),
         }
         for attrs in sorted(project_vertices, key=lambda item: item.get("name", ""))
     ]
@@ -440,9 +448,9 @@ def _summary(
         "topology_digest": topology_digest,
         "metadata_digest": model.metadata_digest,
         "architecture_digest": architecture_digest_value,
-        "source_query_surface_schema_version": 1,
+        "source_query_surface_schema_version": QUERY_SURFACE_SCHEMA_VERSION,
         "source_query_surface_sha256": source_query_surface_sha256(graph),
-        "query_surface_schema_version": 2,
+        "query_surface_schema_version": PROJECT_QUERY_SURFACE_SCHEMA_VERSION,
         "query_surface_sha256": project_query_surface_sha256(graph),
         "owned_file_count": owned_file_count,
         "owned_symbol_count": owned_symbol_count,
@@ -727,27 +735,36 @@ def enrich_graph_with_workspace(
                     EDGE_TYPE_CONTAIN,
                 )
 
-        local_diagnostics = []
-        for project in sorted(model.projects, key=lambda item: item.project_id):
-            for dependency in sorted(project.dependencies, key=_dependency_sort_key):
-                target_id = dependency.target_project_id
-                if target_id is None:
-                    continue
-                if target_id == project.project_id:
-                    local_diagnostics.append(
-                        {
-                            "kind": "self_dependency",
-                            "project_id": project.project_id,
-                            "declared_name": dependency.declared_name,
-                            "source_manifest": dependency.source_manifest,
-                        }
-                    )
-                    continue
-                graph.add_architecture_edge(
-                    project.project_id,
-                    target_id,
-                    EDGE_TYPE_MANIFEST_DEPENDENCY,
+    local_diagnostics = []
+    for project in sorted(model.projects, key=lambda item: item.project_id):
+        for dependency in sorted(project.dependencies, key=_dependency_sort_key):
+            target_id = dependency.target_project_id
+            if target_id is None:
+                continue
+            if target_id == project.project_id:
+                local_diagnostics.append(
+                    {
+                        "kind": "self_dependency",
+                        "project_id": project.project_id,
+                        "declared_name": dependency.declared_name,
+                        "source_manifest": dependency.source_manifest,
+                    }
                 )
+                continue
+            graph.add_architecture_edge(
+                project.project_id,
+                target_id,
+                EDGE_TYPE_MANIFEST_DEPENDENCY,
+                manifest_evidence=(
+                    {
+                        "declared_name": dependency.declared_name,
+                        "scope": dependency.scope,
+                        "specifier": dependency.specifier,
+                        "source_manifest": dependency.source_manifest,
+                        "resolution": dependency.resolution,
+                    },
+                ),
+            )
 
     _apply_project_sharing(graph, model)
     _set_project_counts(graph)
