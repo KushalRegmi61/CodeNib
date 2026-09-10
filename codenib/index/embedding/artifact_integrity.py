@@ -805,7 +805,7 @@ def validate_vector_generation_artifacts(
     builder_schema = (
         artifact.get("builder_schema") if isinstance(artifact, Mapping) else None
     )
-    schema_8 = type(builder_schema) is int and builder_schema == 8
+    schema_8 = type(builder_schema) is int and builder_schema in {8, 9}
     if schema_8 and config.get("row_mapping") != (VECTOR_ROW_MAPPING_CONTRACT):
         raise ValueError("schema-8 vector generation has an invalid row mapping")
     if not schema_8 and config.get("row_mapping") is not None:

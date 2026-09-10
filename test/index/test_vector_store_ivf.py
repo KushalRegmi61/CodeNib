@@ -244,6 +244,20 @@ def test_schema_8_save_commits_bounded_canonical_json_row_mapping(tmp_path):
     validate_vector_generation_artifacts(path, "test__model")
 
 
+def test_schema_9_generation_accepts_row_mapping(tmp_path):
+    path = tmp_path / "vs"
+    store = _make_store(
+        embedding_model="test/model",
+        artifact_metadata={"builder_schema": 9},
+    )
+    store.add_code_chunks(_chunks(2))
+    store.save(str(path))
+
+    config = json.loads((path / "config_test__model.json").read_text())
+    assert config["row_mapping"] == VECTOR_ROW_MAPPING_CONTRACT
+    validate_vector_generation_artifacts(path, "test__model")
+
+
 def test_schema_8_save_enforces_canonical_document_byte_cap(
     tmp_path,
     monkeypatch,
