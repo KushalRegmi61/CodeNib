@@ -88,13 +88,17 @@ def test_search_tool_schemas_publish_bounded_inputs() -> None:
         assert schema["properties"][text_field]["minLength"] == 1
         expected_text_limit = 4_096 if name == "search_regex" else 16_000
         assert schema["properties"][text_field]["maxLength"] == expected_text_limit
-        assert schema["properties"]["top_k"] == {
-            "default": 10 if name in {"search_context", "search_semantic"} else 20,
-            "maximum": 100,
-            "minimum": 1,
-            "title": "Top K",
-            "type": "integer",
-        }
+        top_k = schema["properties"]["top_k"]
+        assert top_k["default"] == (
+            10 if name in {"search_context", "search_semantic"} else 20
+        )
+        assert top_k["maximum"] == 100
+        assert top_k["minimum"] == 1
+        assert top_k["type"] == "integer"
+        assert top_k["description"]
+
+    assert "budget" in tools["search_context"].input_schema["properties"]
+    assert "fast" in tools["search_context"].description
 
     semantic = tools["search_semantic"].input_schema["properties"]
     assert semantic["level"]["enum"] == ["l0", "l2"]

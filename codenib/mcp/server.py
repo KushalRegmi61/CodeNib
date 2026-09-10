@@ -81,35 +81,214 @@ MCPServer = ToolSurfaceMCPServer
 
 # Global context is set once at startup before the event loop runs tools.
 _ctx: Optional[ServerContext] = None
-_SearchText = Annotated[str, Field(min_length=1)]
+_SearchText = Annotated[
+    str,
+    Field(
+        min_length=1,
+        description="A non-empty symbol or identifier seed resolved by CodeNib.",
+    ),
+]
 _SearchQuery = Annotated[
     str,
-    Field(min_length=1, max_length=MAX_SEARCH_QUERY_CHARS),
+    Field(
+        min_length=1,
+        max_length=MAX_SEARCH_QUERY_CHARS,
+        description=(
+            "A repository question, natural-language code query, exact name, "
+            "or error string."
+        ),
+    ),
 ]
-_SearchTopK = Annotated[int, Field(ge=1, le=MAX_TOOL_RESULTS)]
+_SearchTopK = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=MAX_TOOL_RESULTS,
+        description="Maximum number of ranked locations or graph nodes to return.",
+    ),
+]
 _RegexPattern = Annotated[
     str,
-    Field(min_length=1, max_length=MAX_REGEX_PATTERN_CHARS),
+    Field(
+        min_length=1,
+        max_length=MAX_REGEX_PATTERN_CHARS,
+        description="A Python-compatible regex pattern for CodeGraph nodes.",
+    ),
 ]
-_RegexFilter = Annotated[str, Field(max_length=MAX_REGEX_FILTER_CHARS)]
-_SearchLevel = Literal["l0", "l2"]
-_FiniteScore = Annotated[float, Field(allow_inf_nan=False)]
-_GraphDirection = Literal["impact", "dependencies", "both"]
-_GraphDepth = Annotated[int, Field(ge=1, le=MAX_GRAPH_DEPTH)]
-_DependencyEdges = Annotated[int, Field(ge=1, le=MAX_DEPENDENCY_EDGES)]
-_PositiveLine = Annotated[int, Field(ge=1, le=MAX_LSP_POSITION)]
-_Character = Annotated[int, Field(ge=0, le=MAX_LSP_POSITION)]
-_LspFilePath = Annotated[str, Field(max_length=MAX_SOURCE_PATH_CHARS)]
-_LspSymbol = Annotated[str, Field(max_length=MAX_LSP_SYMBOL_CHARS)]
-_LspQuery = Annotated[str, Field(max_length=MAX_LSP_QUERY_CHARS)]
+_RegexFilter = Annotated[
+    str,
+    Field(
+        max_length=MAX_REGEX_FILTER_CHARS,
+        description="Optional file glob or node-type filter that narrows matches.",
+    ),
+]
+_SearchLevel = Annotated[
+    Literal["l0", "l2"],
+    Field(description="Search granularity: l0 files or l2 symbols/functions."),
+]
+_FiniteScore = Annotated[
+    float,
+    Field(
+        allow_inf_nan=False,
+        description="Optional finite similarity threshold; zero disables filtering.",
+    ),
+]
+_GraphDirection = Annotated[
+    Literal["impact", "dependencies", "both"],
+    Field(
+        description=(
+            "Graph direction: impact callers, dependencies callees, or both "
+            "for a local neighborhood."
+        )
+    ),
+]
+_GraphDepth = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=MAX_GRAPH_DEPTH,
+        description="Maximum graph traversal depth; increase only for a named gap.",
+    ),
+]
+_DependencyEdges = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=MAX_DEPENDENCY_EDGES,
+        description="Independent maximum number of graph relationships to return.",
+    ),
+]
+_PositiveLine = Annotated[
+    int,
+    Field(ge=1, le=MAX_LSP_POSITION, description="One-based source line."),
+]
+_Character = Annotated[
+    int,
+    Field(ge=0, le=MAX_LSP_POSITION, description="Zero-based character offset."),
+]
+_LspFilePath = Annotated[
+    str,
+    Field(
+        max_length=MAX_SOURCE_PATH_CHARS,
+        description="Repository-relative POSIX path used for LSP location lookup.",
+    ),
+]
+_LspSymbol = Annotated[
+    str,
+    Field(
+        max_length=MAX_LSP_SYMBOL_CHARS,
+        description="Optional symbol seed used for static navigation.",
+    ),
+]
+_LspQuery = Annotated[
+    str,
+    Field(
+        max_length=MAX_LSP_QUERY_CHARS,
+        description="Fallback route query used when reliable symbol seeds are absent.",
+    ),
+]
 _RouteSymbols = Annotated[
     list[_LspSymbol],
-    Field(max_length=MAX_ROUTE_SYMBOLS),
+    Field(
+        max_length=MAX_ROUTE_SYMBOLS,
+        description="Known symbol seeds for compact route navigation.",
+    ),
 ]
-_SourcePath = Annotated[str, Field(min_length=1, max_length=MAX_SOURCE_PATH_CHARS)]
-_ExploreFilePath = Annotated[str, Field(max_length=MAX_SOURCE_PATH_CHARS)]
-_ExploreTopK = Annotated[int, Field(ge=1, le=MAX_EXPLORE_WINDOWS)]
-_ExploreBudget = Literal["fast", "balanced", "thorough"]
+_SourcePath = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=MAX_SOURCE_PATH_CHARS,
+        description="Authenticated repository-relative POSIX source path.",
+    ),
+]
+_ExploreFilePath = Annotated[
+    str,
+    Field(
+        max_length=MAX_SOURCE_PATH_CHARS,
+        description="Optional repository-relative path used to resolve project scope.",
+    ),
+]
+_ExploreTopK = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=MAX_EXPLORE_WINDOWS,
+        description="Maximum admitted source windows in composed exploration.",
+    ),
+]
+_ExploreBudget = Annotated[
+    Literal["fast", "balanced", "thorough"],
+    Field(
+        description=(
+            "Retrieval budget: fast for orientation, balanced for normal work, "
+            "or thorough when more relationships are required."
+        )
+    ),
+]
+_RetrievalBudget = Annotated[
+    str,
+    Field(
+        description=(
+            "Retrieval budget: fast, balanced, or thorough. The implementation "
+            "also accepts legacy aliases and normalizes them."
+        )
+    ),
+]
+_ProjectId = Annotated[
+    str,
+    Field(
+        description=(
+            "Optional exact project ID. Use it to keep retrieval within a known "
+            "project; do not invent one."
+        )
+    ),
+]
+_FilterTest = Annotated[
+    bool,
+    Field(description="When true, exclude test-file results from retrieval."),
+]
+_IncludeDependencies = Annotated[
+    bool,
+    Field(description="Include bounded dependency relationships in exploration."),
+]
+_IncludeDeclaration = Annotated[
+    bool,
+    Field(description="Include the declaration when returning static references."),
+]
+_IncludeNeighbors = Annotated[
+    bool,
+    Field(description="Include neighboring route anchors around LSP seeds."),
+]
+_CaseSensitive = Annotated[
+    bool,
+    Field(description="Match regex with case sensitivity when true."),
+]
+_GraphGranularity = Annotated[
+    Literal["symbol", "project"],
+    Field(
+        description=(
+            "Return symbol-level edges or aggregate the dependency graph at "
+            "project level."
+        )
+    ),
+]
+_FileFilter = Annotated[
+    str,
+    Field(
+        description=(
+            "Optional Zoekt file glob/regex filter, useful for project, language, "
+            "test, or configuration scope."
+        )
+    ),
+]
+
+_READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
 
 
 @asynccontextmanager
@@ -202,17 +381,19 @@ async def _wait_for_abandoned_explore_worker(
 @mcp.tool(
     name="explore_context",
     description=(
-        "Recommended bounded repository exploration. Composes ranked retrieval, "
-        "the selected LSP-shaped route, dependency expansion, and verified source "
-        "windows. Returns the concrete provider plan, source identity, independent "
-        "diagnostics, and per-connection delivery usage."
+        "Recommended first call for repository context planning. Composes ranked "
+        "retrieval, LSP-shaped routing, bounded dependency expansion, and verified "
+        "source windows. Use budget='fast' for orientation, 'balanced' for normal "
+        "investigation, or 'thorough' when the first result lacks relationships. "
+        "Pass an exact project_id or repository-relative file_path when scope is "
+        "known; unresolved explicit scope blocks retrieval. Add symbols for known "
+        "entry points, direction='impact' for callers or blast radius, "
+        "direction='dependencies' for callees, and direction='both' for a local "
+        "neighborhood. Set filter_test=true for implementation-only retrieval. "
+        "Returns the concrete provider plan, scope, project context, source "
+        "identity, relationships, diagnostics, and per-connection delivery usage."
     ),
-    annotations=ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
-    ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
     structured_output=True,
 )
 async def explore_context(
@@ -221,9 +402,9 @@ async def explore_context(
     top_k: _ExploreTopK = 8,
     budget: _ExploreBudget = "balanced",
     direction: _GraphDirection = "both",
-    include_dependencies: bool = True,
-    filter_test: bool = False,
-    project_id: str = "",
+    include_dependencies: _IncludeDependencies = True,
+    filter_test: _FilterTest = False,
+    project_id: _ProjectId = "",
     file_path: _ExploreFilePath = "",
 ) -> ExploreResponse:
     """Compose repository context and commit delivery history atomically."""
@@ -271,19 +452,25 @@ async def explore_context(
 @mcp.tool(
     name="search_context",
     description=(
-        "Recommended ranked repository-context search. CodeNib selects and "
-        "executes a deterministic BM25, dense, hybrid-RRF, or graph-expanded "
-        "route from the loaded views and requested budget. Returns the selected "
-        "plan, repository provenance, and source-linked results."
+        "Recommended lower-level ranked search when one composed exploration call "
+        "is not enough or a route must be inspected explicitly. CodeNib selects "
+        "a deterministic BM25, dense, hybrid-RRF, or graph-expanded route. Use "
+        "budget='fast' for a small orientation search, 'balanced' for normal "
+        "work, and 'thorough' when more candidates or graph expansion are needed. "
+        "Use level='l0' for file-level conceptual retrieval or level='l2' for "
+        "symbols/functions; set filter_test=true to exclude test files and pass "
+        "project_id for project-scoped retrieval. Returns the selected plan, "
+        "repository/source provenance, diagnostics, and source-linked results."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def search_context(
     query: _SearchQuery,
     top_k: _SearchTopK = 10,
-    budget: str = "balanced",
+    budget: _RetrievalBudget = "balanced",
     level: _SearchLevel = "l2",
-    filter_test: bool = False,
-    project_id: str = "",
+    filter_test: _FilterTest = False,
+    project_id: _ProjectId = "",
 ) -> dict[str, Any]:
     """Execute capability-aware ranked retrieval over loaded repository views."""
     if _ctx is None:
@@ -303,17 +490,22 @@ async def search_context(
 @mcp.tool(
     name="search_semantic",
     description=(
-        "Search codebase semantically using vector embeddings. "
-        "Returns functions, classes, and methods ranked by semantic similarity. "
-        "Best for natural language queries describing functionality or code snippets."
+        "Force vector-semantic retrieval for conceptual or natural-language "
+        "questions when exact identifiers are unknown. Use level='l0' to find "
+        "relevant files or level='l2' for functions/classes/methods; use "
+        "score_threshold only to suppress weak matches and pass project_id when "
+        "scope is known. Results are candidates, not proof; bind important hits "
+        "with LSP and inspect them with read_source. Returns an explicit error "
+        "when the vector view is unavailable."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def semantic_search(
     query: _SearchQuery,
     top_k: _SearchTopK = 10,
     level: _SearchLevel = "l2",
     score_threshold: _FiniteScore = 0.0,
-    project_id: str = "",
+    project_id: _ProjectId = "",
 ) -> list[dict[str, Any]] | dict[str, str]:
     """Semantic search over indexed code using vector embeddings.
 
@@ -335,18 +527,20 @@ async def semantic_search(
 @mcp.tool(
     name="search_bm25",
     description=(
-        "Search for code symbols using BM25 keyword retrieval. "
-        "Returns functions, classes, and methods ranked by relevance "
-        "with source content. Best for exact-name or keyword lookups. "
-        "Prefer this over search_regex when you know the symbol name "
-        "or have a natural-language description of what the code does."
+        "Use BM25 for exact names, identifiers, error strings, or keyword-heavy "
+        "queries. It returns ranked symbol candidates with projected source "
+        "content. Use filter_test=true to exclude test files and project_id to "
+        "keep results within a known project. Prefer search_regex for structural "
+        "patterns and search_zoekt for comments, docs, configuration, or other "
+        "raw text; verify important candidates with LSP/read_source."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def search_bm25(
     query: _SearchQuery,
     top_k: _SearchTopK = 20,
-    filter_test: bool = False,
-    project_id: str = "",
+    filter_test: _FilterTest = False,
+    project_id: _ProjectId = "",
 ) -> list[dict[str, Any]]:
     """BM25 keyword search over indexed code symbols."""
     if _ctx is None:
@@ -359,20 +553,22 @@ async def search_bm25(
 @mcp.tool(
     name="search_regex",
     description=(
-        "Search code graph nodes by regex pattern (grep-like). "
-        "Supports file glob filtering and node type filtering. "
-        "Returns matching file and symbol nodes with source content. "
-        "Best for pattern-based searches across the codebase. "
-        "Prefer search_bm25 when you know the exact name; "
-        "prefer this when you need structural pattern matching."
+        "Use CodeGraph regex search for structural patterns across file and symbol "
+        "nodes: test names, decorators, TODOs, class/function shapes, or node-type "
+        "constrained matches. Pass file_glob to narrow a resolved project or test "
+        "tree and node_type to distinguish file, class, function, or method nodes. "
+        "Use case_sensitive only when pattern spelling matters. Prefer BM25 for an "
+        "exact identifier and Zoekt for raw comments/docs/configuration. Results "
+        "are graph candidates and should be followed by read_source."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def search_regex(
     pattern: _RegexPattern,
     top_k: _SearchTopK = 20,
     file_glob: _RegexFilter = "",
     node_type: _RegexFilter = "",
-    case_sensitive: bool = False,
+    case_sensitive: _CaseSensitive = False,
 ) -> list[dict[str, Any]]:
     """Regex pattern search over code graph nodes."""
     if _ctx is None:
@@ -391,18 +587,20 @@ async def search_regex(
 @mcp.tool(
     name="search_zoekt",
     description=(
-        "Search raw repository contents using a Zoekt trigram index. "
-        "Returns file-level matches with line ranges and snippet content. "
-        "Best for fast substring or regex lookups that span the whole "
-        "repo (magic strings, comments, identifiers across files). "
-        "Prefer search_bm25 for ranked symbol results or search_regex for "
-        "file/symbol results bound to the CodeGraph."
+        "Use the Zoekt trigram index for fast raw-text lookups that may occur in "
+        "comments, documentation, configuration, generated-looking text, or files "
+        "outside CodeGraph. The query may be a substring, regex:pattern, or include "
+        "atoms such as case:no and lang:python. Use file_filter to narrow by project, "
+        "language, test tree, or configuration path. Results are file-level matches "
+        "with line ranges; call read_source before treating a match as evidence. "
+        "Prefer BM25 for ranked symbols and search_regex for structural graph nodes."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def search_zoekt(
     query: _SearchQuery,
     top_k: _SearchTopK = 20,
-    file_filter: str = "",
+    file_filter: _FileFilter = "",
 ) -> list[dict[str, Any]]:
     """Trigram-based search over raw repository contents."""
     if _ctx is None:
@@ -419,16 +617,16 @@ async def search_zoekt(
 @mcp.tool(
     name="dependency_subgraph",
     description=(
-        "Return the call-graph dependency subgraph for a symbol as nodes+edges "
-        "JSON. direction='impact' = transitive callers (blast radius: what may "
-        "break if you change it); 'dependencies' = transitive callees (what it "
-        "relies on); 'both' = 1-hop caller+callee neighborhood (for a dependency "
-        "view). The structural 'who calls X / what does X reach' question that "
-        "grep/keyword search cannot answer; backs impact analysis and dependency "
-        "visualization. max_nodes includes the queried root; max_edges bounds "
-        "relationships independently. Symbols are fuzzy-matched; unresolved "
-        "names return a note."
+        "Use the bounded graph for structural questions that search cannot answer. "
+        "direction='impact' follows transitive callers for change blast radius; "
+        "direction='dependencies' follows transitive callees; direction='both' "
+        "returns a local caller/callee neighborhood. Use granularity='symbol' for "
+        "function-level edges or granularity='project' for aggregated project "
+        "relationships. Increase depth, max_nodes, or max_edges only for a named "
+        "evidence gap. Resolve fuzzy symbols with BM25/LSP first when possible; "
+        "unresolved names return a note and must not become guessed edges."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def dependency_subgraph(
     symbol: _SearchText,
@@ -436,7 +634,7 @@ async def dependency_subgraph(
     depth: _GraphDepth = 2,
     max_nodes: _SearchTopK = 60,
     max_edges: _DependencyEdges = 400,
-    granularity: Literal["symbol", "project"] = "symbol",
+    granularity: _GraphGranularity = "symbol",
 ) -> dict[str, Any]:
     """Call-graph subgraph for *symbol*, bounded by node and edge budgets."""
     if _ctx is None:
@@ -455,12 +653,35 @@ async def dependency_subgraph(
 
 @mcp.tool(
     name="find_projects_using",
-    description="Find bounded external workspace projects that consume a symbol.",
+    description=(
+        "Use for cross-project impact of a resolved shared symbol or library. "
+        "Returns bounded external workspace projects and supporting evidence; "
+        "max_projects limits project rows and max_evidence limits supporting "
+        "locations. Resolve the symbol before calling when possible, and follow "
+        "returned project IDs with project-scoped search_context or explore_context. "
+        "Do not infer consumers from name similarity when the project graph is "
+        "unavailable."
+    ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def find_projects_using_tool(
     symbol: _SearchText,
-    max_projects: Annotated[int, Field(ge=1, le=100)] = 100,
-    max_evidence: Annotated[int, Field(ge=1, le=200)] = 200,
+    max_projects: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=100,
+            description="Maximum number of consuming projects to return.",
+        ),
+    ] = 100,
+    max_evidence: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=200,
+            description="Maximum supporting cross-project evidence rows.",
+        ),
+    ] = 200,
 ) -> dict[str, Any]:
     if _ctx is None:
         raise RuntimeError("Server not initialized")
@@ -476,11 +697,15 @@ async def find_projects_using_tool(
 @mcp.tool(
     name="lsp_definition",
     description=(
-        "Return compact definition locations from CodeNib's runtime LSP "
-        "provider or persisted symbol graph fallback. Provide either symbol "
-        "or file_path + 1-based line. Results are locations only; call "
-        "read_source before finalizing."
+        "Use static navigation to bind a candidate symbol or source position to "
+        "definition locations. Provide either symbol or repository-relative "
+        "file_path plus a 1-based line and optional 0-based character. Results "
+        "are compact locations from the runtime LSP provider or persisted graph "
+        "fallback, not source evidence; call read_source on selected locations "
+        "before finalizing a claim. Inspect provider/fallback metadata when the "
+        "result is incomplete."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def lsp_definition(
     file_path: _LspFilePath = "",
@@ -506,18 +731,22 @@ async def lsp_definition(
 @mcp.tool(
     name="lsp_references",
     description=(
-        "Return compact definition/reference locations from CodeNib's runtime "
-        "LSP provider or persisted symbol graph fallback. Provide either "
-        "symbol or file_path + 1-based line. Results are locations only; call "
-        "read_source before finalizing."
+        "Use static navigation to find direct references or declarations for a "
+        "resolved symbol or source position. Provide either symbol or a "
+        "repository-relative file_path with 1-based line and optional 0-based "
+        "character. Set include_declaration=false when the declaration is already "
+        "known. Results are locations only; use read_source for selected callers "
+        "and dependency_subgraph for transitive impact. Static references do not "
+        "prove dynamic or reflective usage."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def lsp_references(
     file_path: _LspFilePath = "",
     line: _PositiveLine | None = None,
     character: _Character | None = None,
     symbol: _LspSymbol = "",
-    include_declaration: bool = True,
+    include_declaration: _IncludeDeclaration = True,
     top_k: _SearchTopK = 40,
 ) -> list[dict[str, Any]] | dict[str, str]:
     """Provider-backed reference lookup with persisted-graph fallback."""
@@ -538,18 +767,22 @@ async def lsp_references(
 @mcp.tool(
     name="lsp_route",
     description=(
-        "Return compact route anchors from CodeNib's runtime LSP provider or "
-        "persisted symbol graph fallback for symbol seeds, or use a query "
-        "alone when no reliable symbol is known. Use this for a route map "
-        "across endpoint, bridge/factory, provider/value, or type anchors. "
-        "Results are locations only; call read_source before finalizing."
+        "Use compact LSP-shaped route navigation for endpoint, bridge/factory, "
+        "provider/value, or type anchors. Pass known symbols, or pass symbols=[] "
+        "with a non-blank query when no reliable symbol is known. Set "
+        "include_neighbors=false for only the supplied route seeds. Results are "
+        "locations from the runtime provider or graph fallback; bind important "
+        "anchors with lsp_definition and read_source before finalizing. Direct "
+        "calls have no project_id filter, so use explore_context when strict "
+        "project isolation is load-bearing."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def lsp_route(
     symbols: _RouteSymbols,
     query: _LspQuery = "",
     top_k: _SearchTopK = 12,
-    include_neighbors: bool = True,
+    include_neighbors: _IncludeNeighbors = True,
 ) -> list[dict[str, Any]] | dict[str, str]:
     """Provider-backed route map with persisted-graph fallback."""
     if _ctx is None:
@@ -567,11 +800,15 @@ async def lsp_route(
 @mcp.tool(
     name="read_source",
     description=(
-        "Read up to 200 lines authenticated by the retained source-content "
-        "binding using a "
-        "repository-relative POSIX path and 1-based inclusive line range. "
-        "Responses are bounded; commit is display provenance, not attested."
+        "Read a bounded source window after search or static navigation identifies "
+        "an exact location. Use only a repository-relative POSIX path and a 1-based "
+        "inclusive line range of at most 200 lines; responses contain at most "
+        "16,000 source characters. The server reads only while the retained source "
+        "binding is verified and returns its fingerprint/provenance. Use this tool "
+        "before finalizing source-backed claims; if the binding is unavailable, keep "
+        "indexed excerpts explicitly marked as unverified instead."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def read_source(
     file_path: _SourcePath,
@@ -593,9 +830,14 @@ async def read_source(
 @mcp.tool(
     name="get_manifest",
     description=(
-        "Return metadata about the indexed repository: path, commit, "
-        "languages, available indexes, and capabilities."
+        "Call once at the start of an MCP connection or whenever capability state "
+        "is uncertain. Returns repository path/commit/languages, loaded views, "
+        "view errors, workspace/project-query and project-retrieval availability, "
+        "LSP provider selection, source verification, tool_surface, and session "
+        "usage. Use it to choose valid search/LSP/graph fallbacks; it does not "
+        "return source context itself."
     ),
+    annotations=_READ_ONLY_TOOL_ANNOTATIONS,
 )
 async def get_manifest() -> dict[str, Any]:
     """Return the repo manifest as a dict."""

@@ -18,10 +18,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...context_delivery import project_evidence_payloads
-from ...graph.project_queries import (
-    project_context_for_scope,
-    resolve_project_scope,
-)
 from ..explore_bounds import MAX_EXPLORE_PAYLOAD_BYTES, bound_explore_response
 from ._validation import (
     MAX_EXPLORE_WINDOWS,
@@ -432,6 +428,13 @@ def explore_context_impl(
     file_path: str = "",
 ) -> dict[str, Any]:
     """Return ranked, routed, dependency-aware source context in one call."""
+
+    # Keep optional graph runtimes lazy so MCP tool discovery and retrieval-only
+    # server startup remain available when the symbol-graph view is not installed.
+    from ...graph.project_queries import (
+        project_context_for_scope,
+        resolve_project_scope,
+    )
 
     normalized_query = required_text(
         query,

@@ -97,6 +97,7 @@ def test_tool_surface_normalization_rejects_unknown_value() -> None:
                 "search_regex",
                 "search_zoekt",
                 "dependency_subgraph",
+                "find_projects_using",
                 "lsp_definition",
                 "lsp_references",
                 "lsp_route",
