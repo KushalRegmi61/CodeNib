@@ -29,8 +29,11 @@ then installs package-managed graph providers, builds `bm25` and
 - Claude Code receives a local-scope registration through `claude mcp add` in
   the selected repository.
 
-CodeNib does not edit Codex TOML, Claude JSON, `.mcp.json`, `AGENTS.md`, or
-`CLAUDE.md` itself. It never writes an index into the target checkout. A
+By default CodeNib does not edit Codex TOML, Claude JSON, `.mcp.json`,
+`AGENTS.md`, or `CLAUDE.md` itself. Pass `--install-context-planner` to
+explicitly install the project-local `.claude/skills/context-planner/SKILL.md`
+and a managed section in `.claude/CLAUDE.md`; it never writes user-level skill
+directories or `AGENTS.md`. It never writes an index into the target checkout. A
 readable repository slug plus a path digest makes the server name unique, so
 several checkouts can coexist.
 
@@ -49,11 +52,18 @@ preview the complete plan:
 codenib codegraph init . --agent codex
 codenib codegraph init . --agent claude
 codenib codegraph init . --agent codex --agent claude --dry-run
+codenib codegraph init . --install-context-planner --dry-run
 ```
 
 Running the same initialization again reuses a current index and matching
-native registrations. CodeNib refuses to overwrite an unmanaged server with
-the same name or a managed registration whose command has drifted.
+native registrations. With `--install-context-planner`, the same command also
+reconciles unchanged CodeNib-owned Skill/guidance content and refuses to
+overwrite manually modified files or an unmanaged context-planner section.
+
+The installed Skill resolves MCP tool names from the live registration and
+does not hardcode a client-specific prefix. It starts with bounded
+`explore_context`, preserves project/file scope, and records provider/source
+diagnostics before making context claims.
 
 ## Select the repository source surface
 
@@ -227,12 +237,15 @@ Remove the client registrations without deleting the reusable index:
 
 ```bash
 codenib codegraph uninstall /absolute/path/to/repository
+codenib codegraph uninstall /absolute/path/to/repository \
+  --remove-context-planner
 ```
 
-CodeNib removes only clients named in its private per-repository receipt. It
-first asks the native CLI for the current configuration and refuses removal if
-the command differs. Inspect that registration before explicitly overriding
-the guard:
+CodeNib removes only clients named in its private per-repository receipt. With
+`--remove-context-planner`, it also removes only unchanged project-local Skill
+files or the unchanged managed guidance block. It first asks the native CLI
+for current client configuration and refuses removal if the command differs.
+Inspect that registration before explicitly overriding the guard:
 
 ```bash
 codenib codegraph uninstall . --agent codex --dry-run

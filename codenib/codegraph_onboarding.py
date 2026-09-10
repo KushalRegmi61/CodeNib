@@ -11,6 +11,8 @@ or remove a registration whose observed command has drifted.
 
 from __future__ import annotations
 
+import hashlib
+import importlib.resources
 import json
 import os
 import re
@@ -26,9 +28,15 @@ from ._version import package_version
 from .paths import repo_state_dir, repository_state_key
 
 CODEGRAPH_CLIENTS = ("codex", "claude")
-CODEGRAPH_RECEIPT_SCHEMA = 1
+CODEGRAPH_RECEIPT_SCHEMA = 2
+_SUPPORTED_RECEIPT_SCHEMAS = frozenset({1, CODEGRAPH_RECEIPT_SCHEMA})
 CODEGRAPH_RECEIPT_DIRNAME = "codegraph"
 CODEGRAPH_RECEIPT_FILENAME = "agent-integrations.json"
+
+CONTEXT_PLANNER_SKILL_PATH = Path(".claude/skills/context-planner/SKILL.md")
+CONTEXT_PLANNER_CLAUDE_PATH = Path(".claude/CLAUDE.md")
+CONTEXT_PLANNER_MARKER_START = "<!-- codenib:context-planner:start -->"
+CONTEXT_PLANNER_MARKER_END = "<!-- codenib:context-planner:end -->"
 
 _CLIENT_SCOPES = {"codex": "user", "claude": "local"}
 _CLIENT_STATES = frozenset({"pending", "configured"})
@@ -62,12 +70,52 @@ class ManagedClient:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextPlannerInstallation:
+    """Receipt data for files CodeNib installed into one project."""
+
+    skill_sha256: str
+    claude_block_sha256: str
+    skill_created: bool
+    claude_created: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "skill_path": CONTEXT_PLANNER_SKILL_PATH.as_posix(),
+            "skill_sha256": self.skill_sha256,
+            "claude_path": CONTEXT_PLANNER_CLAUDE_PATH.as_posix(),
+            "claude_block_sha256": self.claude_block_sha256,
+            "skill_created": self.skill_created,
+            "claude_created": self.claude_created,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPlannerInspection:
+    """Current state of the project-local context-planner installation."""
+
+    state: str
+    skill_state: str
+    claude_state: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPlannerInstallPlan:
+    """Conflict-checked file actions for one planner installation."""
+
+    installation: ContextPlannerInstallation
+    skill_action: str
+    claude_action: str
+
+
+@dataclass(frozen=True, slots=True)
 class CodeGraphReceipt:
     """CodeNib-owned evidence for safe idempotency and removal."""
 
     repository: Path
     server: MCPServerSpec
     clients: tuple[ManagedClient, ...]
+    context_planner: ContextPlannerInstallation | None = None
 
     def client(self, name: str) -> ManagedClient | None:
         return next((item for item in self.clients if item.name == name), None)
@@ -80,14 +128,33 @@ class CodeGraphReceipt:
         retained = [item for item in self.clients if item.name != name]
         retained.append(ManagedClient(name, _CLIENT_SCOPES[name], state))
         retained.sort(key=lambda item: CODEGRAPH_CLIENTS.index(item.name))
-        return CodeGraphReceipt(self.repository, self.server, tuple(retained))
+        return CodeGraphReceipt(
+            self.repository,
+            self.server,
+            tuple(retained),
+            self.context_planner,
+        )
+
+    def with_context_planner(
+        self, installation: ContextPlannerInstallation
+    ) -> "CodeGraphReceipt":
+        return CodeGraphReceipt(
+            self.repository,
+            self.server,
+            self.clients,
+            installation,
+        )
 
     def without_client(self, name: str) -> "CodeGraphReceipt":
         return CodeGraphReceipt(
             self.repository,
             self.server,
             tuple(item for item in self.clients if item.name != name),
+            self.context_planner,
         )
+
+    def without_context_planner(self) -> "CodeGraphReceipt":
+        return CodeGraphReceipt(self.repository, self.server, self.clients, None)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -102,6 +169,11 @@ class CodeGraphReceipt:
                 item.name: {"scope": item.scope, "state": item.state}
                 for item in self.clients
             },
+            "context_planner": (
+                self.context_planner.to_dict()
+                if self.context_planner is not None
+                else None
+            ),
         }
 
 
@@ -262,6 +334,67 @@ def _strict_keys(
     return value
 
 
+def _strict_bool(value: object, *, field: str) -> bool:
+    if type(value) is not bool:
+        raise CodeGraphOnboardingError(
+            f"invalid CodeGraph integration receipt field: {field}"
+        )
+    return value
+
+
+def _strict_sha256(value: object, *, field: str) -> str:
+    result = _strict_string(value, field=field)
+    if len(result) != 64 or any(
+        character not in "0123456789abcdef" for character in result
+    ):
+        raise CodeGraphOnboardingError(
+            f"invalid CodeGraph integration receipt field: {field}"
+        )
+    return result
+
+
+def _parse_context_planner_receipt(
+    value: object,
+) -> ContextPlannerInstallation | None:
+    if value is None:
+        return None
+    item = _strict_keys(
+        value,
+        {
+            "skill_path",
+            "skill_sha256",
+            "claude_path",
+            "claude_block_sha256",
+            "skill_created",
+            "claude_created",
+        },
+        field="context_planner",
+    )
+    if item["skill_path"] != CONTEXT_PLANNER_SKILL_PATH.as_posix():
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt field: context_planner.skill_path"
+        )
+    if item["claude_path"] != CONTEXT_PLANNER_CLAUDE_PATH.as_posix():
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt field: context_planner.claude_path"
+        )
+    return ContextPlannerInstallation(
+        skill_sha256=_strict_sha256(
+            item["skill_sha256"], field="context_planner.skill_sha256"
+        ),
+        claude_block_sha256=_strict_sha256(
+            item["claude_block_sha256"],
+            field="context_planner.claude_block_sha256",
+        ),
+        skill_created=_strict_bool(
+            item["skill_created"], field="context_planner.skill_created"
+        ),
+        claude_created=_strict_bool(
+            item["claude_created"], field="context_planner.claude_created"
+        ),
+    )
+
+
 def load_codegraph_receipt(repository: str | Path) -> CodeGraphReceipt | None:
     """Load and strictly validate the per-checkout receipt, if present."""
 
@@ -276,15 +409,22 @@ def load_codegraph_receipt(repository: str | Path) -> CodeGraphReceipt | None:
             f"cannot read CodeGraph integration receipt {path}: {exc}"
         ) from exc
 
-    root = _strict_keys(
-        payload,
-        {"schema_version", "repository", "server", "clients"},
-        field="root",
-    )
-    if type(root["schema_version"]) is not int or root["schema_version"] != 1:
+    if type(payload) is not dict:
+        raise CodeGraphOnboardingError(
+            "invalid CodeGraph integration receipt object: root"
+        )
+    schema_version = payload.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version not in _SUPPORTED_RECEIPT_SCHEMAS
+    ):
         raise CodeGraphOnboardingError(
             "unsupported CodeGraph integration receipt schema"
         )
+    expected_root_keys = {"schema_version", "repository", "server", "clients"}
+    if schema_version >= 2:
+        expected_root_keys.add("context_planner")
+    root = _strict_keys(payload, expected_root_keys, field="root")
     recorded_repo = Path(
         _strict_string(root["repository"], field="repository")
     ).expanduser()
@@ -351,7 +491,313 @@ def load_codegraph_receipt(repository: str | Path) -> CodeGraphReceipt | None:
                 f"invalid CodeGraph integration receipt client: {name}"
             )
         clients.append(ManagedClient(name, scope, state))
-    return CodeGraphReceipt(repo, server, tuple(clients))
+    planner = (
+        _parse_context_planner_receipt(root["context_planner"])
+        if schema_version >= 2
+        else None
+    )
+    return CodeGraphReceipt(repo, server, tuple(clients), planner)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _context_planner_assets() -> tuple[str, str]:
+    package = importlib.resources.files("codenib.agent.instructions.context_planner")
+    try:
+        return (
+            package.joinpath("SKILL.md").read_text(encoding="utf-8"),
+            package.joinpath("CLAUDE.md.fragment").read_text(encoding="utf-8"),
+        )
+    except (FileNotFoundError, OSError, UnicodeError) as exc:
+        raise CodeGraphOnboardingError(
+            f"context-planner instruction assets are unavailable: {exc}"
+        ) from exc
+
+
+def _context_planner_block(fragment: str) -> str:
+    return (
+        f"{CONTEXT_PLANNER_MARKER_START}\n"
+        f"{fragment.rstrip()}\n"
+        f"{CONTEXT_PLANNER_MARKER_END}\n"
+    )
+
+
+def _safe_existing_file(path: Path, *, label: str) -> str | None:
+    if path.is_symlink():
+        raise CodeGraphOnboardingError(
+            f"refusing to manage {label}: path is not a regular file: {path}"
+        )
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise CodeGraphOnboardingError(
+            f"refusing to manage {label}: path is not a regular file: {path}"
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise CodeGraphOnboardingError(f"cannot read {label} {path}: {exc}") from exc
+
+
+def _safe_directory(path: Path, *, label: str) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise CodeGraphOnboardingError(
+            f"refusing to manage {label}: path is not a directory: {path}"
+        )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _extract_context_planner_block(content: str) -> tuple[str, str, str] | None:
+    starts = content.count(CONTEXT_PLANNER_MARKER_START)
+    ends = content.count(CONTEXT_PLANNER_MARKER_END)
+    if starts == 0 and ends == 0:
+        return None
+    if starts != 1 or ends != 1:
+        raise CodeGraphOnboardingError(
+            "context-planner markers are duplicated or unbalanced in .claude/CLAUDE.md"
+        )
+    start = content.index(CONTEXT_PLANNER_MARKER_START)
+    end_marker = content.index(CONTEXT_PLANNER_MARKER_END)
+    if end_marker < start:
+        raise CodeGraphOnboardingError(
+            "context-planner markers are out of order in .claude/CLAUDE.md"
+        )
+    end = end_marker + len(CONTEXT_PLANNER_MARKER_END)
+    if content.startswith("\n", end):
+        end += 1
+    return content[:start], content[start:end], content[end:]
+
+
+def _append_context_planner_block(content: str, block: str) -> str:
+    if not content:
+        return block
+    return content.rstrip("\n") + "\n\n" + block
+
+
+def _replace_context_planner_block(content: str, block: str) -> str:
+    extracted = _extract_context_planner_block(content)
+    if extracted is None:
+        return _append_context_planner_block(content, block)
+    prefix, _old_block, suffix = extracted
+    return prefix + block + suffix
+
+
+def _remove_context_planner_block(content: str) -> str:
+    extracted = _extract_context_planner_block(content)
+    if extracted is None:
+        return content
+    prefix, _block, suffix = extracted
+    if prefix.strip() and suffix.strip():
+        return prefix.rstrip("\n") + "\n\n" + suffix.lstrip("\n")
+    return (prefix + suffix).strip("\n") + ("\n" if prefix or suffix else "")
+
+
+def _context_planner_plan(
+    repository: str | Path,
+    receipt: CodeGraphReceipt | None = None,
+) -> tuple[ContextPlannerInstallPlan, str, str, str]:
+    repo = Path(repository).expanduser().resolve()
+    skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
+    claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    skill_content, fragment = _context_planner_assets()
+    block = _context_planner_block(fragment)
+    _safe_directory(repo / ".claude", label=".claude")
+    _safe_directory(repo / ".claude" / "skills", label=".claude/skills")
+    current_skill = _safe_existing_file(skill_path, label="context-planner Skill")
+    current_claude = _safe_existing_file(claude_path, label="CLAUDE.md")
+    previous = receipt.context_planner if receipt is not None else None
+
+    skill_created = current_skill is None
+    if current_skill is None:
+        skill_action = "create"
+    elif current_skill == skill_content:
+        skill_action = "current"
+        skill_created = previous.skill_created if previous is not None else False
+    elif previous is not None and _sha256_text(current_skill) == previous.skill_sha256:
+        skill_action = "refresh"
+        skill_created = previous.skill_created
+    else:
+        raise CodeGraphOnboardingError(
+            f"refusing to overwrite unmanaged or modified context-planner Skill: {skill_path}"
+        )
+
+    claude_created = current_claude is None
+    if current_claude is None:
+        claude_action = "create"
+    else:
+        extracted = _extract_context_planner_block(current_claude)
+        if extracted is None:
+            claude_action = "append"
+        else:
+            _prefix, current_block, _suffix = extracted
+            if current_block == block:
+                claude_action = "current"
+                claude_created = (
+                    previous.claude_created if previous is not None else False
+                )
+            elif (
+                previous is not None
+                and _sha256_text(current_block) == previous.claude_block_sha256
+            ):
+                claude_action = "refresh"
+                claude_created = previous.claude_created
+            else:
+                raise CodeGraphOnboardingError(
+                    "refusing to overwrite an unmanaged or modified context-planner "
+                    f"section in {claude_path}"
+                )
+
+    installation = ContextPlannerInstallation(
+        skill_sha256=_sha256_text(skill_content),
+        claude_block_sha256=_sha256_text(block),
+        skill_created=skill_created,
+        claude_created=claude_created,
+    )
+    return (
+        ContextPlannerInstallPlan(installation, skill_action, claude_action),
+        skill_content,
+        block,
+        current_claude or "",
+    )
+
+
+def install_context_planner(
+    repository: str | Path,
+    *,
+    receipt: CodeGraphReceipt | None = None,
+    dry_run: bool = False,
+) -> ContextPlannerInstallPlan:
+    """Install the project-local context-planner Skill and guidance."""
+
+    plan, skill_content, block, current_claude = _context_planner_plan(
+        repository,
+        receipt,
+    )
+    if dry_run:
+        return plan
+
+    repo = Path(repository).expanduser().resolve()
+    skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
+    claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    if plan.skill_action != "current":
+        _atomic_write_text(skill_path, skill_content)
+    if plan.claude_action == "create":
+        _atomic_write_text(claude_path, block)
+    elif plan.claude_action in {"append", "refresh"}:
+        _atomic_write_text(
+            claude_path,
+            _replace_context_planner_block(current_claude, block),
+        )
+    return plan
+
+
+def inspect_context_planner(
+    repository: str | Path,
+    receipt: CodeGraphReceipt | None = None,
+) -> ContextPlannerInspection:
+    """Report whether project-local planner files are current or drifted."""
+
+    repo = Path(repository).expanduser().resolve()
+    skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
+    claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    try:
+        skill_content, fragment = _context_planner_assets()
+        expected_block = _context_planner_block(fragment)
+        skill = _safe_existing_file(skill_path, label="context-planner Skill")
+        claude = _safe_existing_file(claude_path, label="CLAUDE.md")
+        if skill is None:
+            skill_state = "missing"
+        elif skill == skill_content:
+            skill_state = "current"
+        else:
+            skill_state = "drifted"
+        if claude is None:
+            claude_state = "missing"
+        else:
+            extracted = _extract_context_planner_block(claude)
+            claude_state = (
+                "missing"
+                if extracted is None
+                else "current" if extracted[1] == expected_block else "drifted"
+            )
+    except CodeGraphOnboardingError as exc:
+        return ContextPlannerInspection("drifted", "drifted", "drifted", str(exc))
+
+    states = (skill_state, claude_state)
+    if "drifted" in states:
+        state = "drifted"
+    elif "missing" in states:
+        state = "missing"
+    else:
+        state = "current"
+    managed = receipt is not None and receipt.context_planner is not None
+    detail = f"Skill {skill_state}; CLAUDE.md {claude_state}"
+    if state == "current" and not managed:
+        detail += "; installation is not recorded in the CodeNib receipt"
+    return ContextPlannerInspection(state, skill_state, claude_state, detail)
+
+
+def remove_context_planner(
+    repository: str | Path,
+    installation: ContextPlannerInstallation,
+) -> tuple[str, ...]:
+    """Remove unchanged files or blocks recorded by CodeNib."""
+
+    repo = Path(repository).expanduser().resolve()
+    skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
+    claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    removed: list[str] = []
+    skill = _safe_existing_file(skill_path, label="context-planner Skill")
+    if skill is not None:
+        if _sha256_text(skill) != installation.skill_sha256:
+            raise CodeGraphOnboardingError(
+                f"refusing to remove modified context-planner Skill: {skill_path}"
+            )
+        if installation.skill_created:
+            skill_path.unlink()
+            removed.append(str(CONTEXT_PLANNER_SKILL_PATH))
+
+    claude = _safe_existing_file(claude_path, label="CLAUDE.md")
+    if claude is not None:
+        extracted = _extract_context_planner_block(claude)
+        if extracted is not None:
+            if _sha256_text(extracted[1]) != installation.claude_block_sha256:
+                raise CodeGraphOnboardingError(
+                    "refusing to remove a modified context-planner section from "
+                    f"{claude_path}"
+                )
+            if (
+                installation.claude_created
+                and extracted[0].strip() == ""
+                and extracted[2].strip() == ""
+            ):
+                claude_path.unlink()
+            else:
+                _atomic_write_text(claude_path, _remove_context_planner_block(claude))
+            removed.append(str(CONTEXT_PLANNER_CLAUDE_PATH))
+    return tuple(removed)
 
 
 def write_codegraph_receipt(receipt: CodeGraphReceipt) -> Path:
@@ -624,19 +1070,29 @@ def remove_client_registration(
 
 __all__ = [
     "CODEGRAPH_CLIENTS",
+    "CONTEXT_PLANNER_CLAUDE_PATH",
+    "CONTEXT_PLANNER_MARKER_END",
+    "CONTEXT_PLANNER_MARKER_START",
+    "CONTEXT_PLANNER_SKILL_PATH",
     "ClientInspection",
     "CodeGraphOnboardingError",
     "CodeGraphReceipt",
+    "ContextPlannerInstallation",
+    "ContextPlannerInspection",
+    "ContextPlannerInstallPlan",
     "MCPServerSpec",
     "ServerCommandInspection",
     "add_client_registration",
     "codegraph_receipt_path",
     "codegraph_server_name",
+    "install_context_planner",
     "inspect_client_registration",
+    "inspect_context_planner",
     "inspect_server_command",
     "load_codegraph_receipt",
     "make_server_spec",
     "remove_client_registration",
+    "remove_context_planner",
     "remove_codegraph_receipt",
     "resolve_codenib_command",
     "resolve_requested_clients",

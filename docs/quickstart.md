@@ -45,9 +45,24 @@ CodeNib performs five bounded steps:
 5. Writes a private CodeNib management receipt outside the checkout so repeat
    initialization is idempotent and uninstall can fail closed on drift.
 
-The command does not create `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, or index
-files in the repository. Codex owns its user-level registration; Claude Code
-owns a local-scope registration associated with that repository.
+Without the opt-in below, the command does not create `.mcp.json`,
+`AGENTS.md`, `CLAUDE.md`, or index files in the repository. Codex owns its
+user-level registration; Claude Code owns a local-scope registration associated
+with that repository.
+
+To also install CodeNib's project-local context-planner Skill and its managed
+Claude guidance, opt in explicitly:
+
+```bash
+codenib codegraph init /path/to/repository --install-context-planner
+```
+
+This writes `.claude/skills/context-planner/SKILL.md` and a marked section in
+`.claude/CLAUDE.md`. The files are project-local; CodeNib does not write
+`~/.claude`, `.codex/skills`, or `AGENTS.md`. Use `--dry-run` to preview the
+instruction changes. `codegraph status` reports the planner as `current`,
+`missing`, or `drifted`, and `codegraph uninstall --remove-context-planner`
+removes only unchanged files managed by CodeNib.
 
 The repository must be a clean Git working tree. The initializer does not run
 project package managers or build systems; it checks the worktree again after

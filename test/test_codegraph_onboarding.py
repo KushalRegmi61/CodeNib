@@ -17,15 +17,19 @@ from codenib.codegraph_onboarding import (
     ClientInspection,
     CodeGraphOnboardingError,
     CodeGraphReceipt,
+    ContextPlannerInstallation,
     MCPServerSpec,
     add_client_registration,
     codegraph_receipt_path,
     codegraph_server_name,
     inspect_client_registration,
+    inspect_context_planner,
     inspect_server_command,
+    install_context_planner,
     load_codegraph_receipt,
     make_server_spec,
     remove_client_registration,
+    remove_context_planner,
     resolve_codenib_command,
     resolve_requested_clients,
     write_codegraph_receipt,
@@ -98,22 +102,33 @@ def test_codegraph_parser_exposes_init_status_and_uninstall() -> None:
             "claude",
             "--exclude-dir",
             "ios/Pods",
+            "--install-context-planner",
             "--dry-run",
         ]
     )
     status = parser.parse_args(["codegraph", "status", ".", "--json"])
     uninstall = parser.parse_args(
-        ["codegraph", "uninstall", ".", "--agent", "codex", "--force"]
+        [
+            "codegraph",
+            "uninstall",
+            ".",
+            "--agent",
+            "codex",
+            "--force",
+            "--remove-context-planner",
+        ]
     )
 
     assert init.codegraph_command == "init"
     assert init.agent == ["codex", "claude"]
     assert init.exclude_dir == ["ios/Pods"]
+    assert init.install_context_planner is True
     assert init.dry_run is True
     assert status.codegraph_command == "status"
     assert status.json is True
     assert uninstall.codegraph_command == "uninstall"
     assert uninstall.force is True
+    assert uninstall.remove_context_planner is True
 
 
 def test_server_name_is_bounded_readable_and_checkout_specific(tmp_path: Path) -> None:
@@ -187,6 +202,142 @@ def test_receipt_round_trip_is_private_and_deterministic(
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
     assert path == codegraph_receipt_path(repo)
+
+
+def test_context_planner_install_is_idempotent_and_receiptable(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+
+    dry_run = install_context_planner(repo, dry_run=True)
+    assert dry_run.skill_action == "create"
+    assert dry_run.claude_action == "create"
+    assert not (repo / ".claude").exists()
+
+    first = install_context_planner(repo)
+    second = install_context_planner(repo)
+
+    assert first.skill_action == "create"
+    assert first.claude_action == "create"
+    assert second.skill_action == "current"
+    assert second.claude_action == "current"
+    assert (repo / ".claude/skills/context-planner/SKILL.md").is_file()
+    claude = (repo / ".claude/CLAUDE.md").read_text(encoding="utf-8")
+    assert "local rules" not in claude
+    assert "<!-- codenib:context-planner:start -->" in claude
+    assert inspect_context_planner(repo).state == "current"
+
+    receipt = CodeGraphReceipt(repo, _server(repo), ()).with_context_planner(
+        first.installation
+    )
+    path = write_codegraph_receipt(receipt)
+    assert load_codegraph_receipt(repo) == receipt
+    assert (
+        json.loads(path.read_text(encoding="utf-8"))["context_planner"]["skill_path"]
+        == ".claude/skills/context-planner/SKILL.md"
+    )
+
+
+def test_context_planner_preserves_existing_claude_rules(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    claude_path = repo / ".claude/CLAUDE.md"
+    claude_path.parent.mkdir(parents=True)
+    claude_path.write_text("# Existing rules\n\nKeep this text.\n", encoding="utf-8")
+
+    plan = install_context_planner(repo)
+    content = claude_path.read_text(encoding="utf-8")
+
+    assert plan.claude_action == "append"
+    assert content.startswith("# Existing rules\n\nKeep this text.")
+    assert content.count("codenib:context-planner:start") == 1
+
+
+def test_context_planner_refuses_unmanaged_or_modified_files(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    skill_path = repo / ".claude/skills/context-planner/SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("user-owned skill\n", encoding="utf-8")
+
+    with pytest.raises(CodeGraphOnboardingError, match="refusing to overwrite"):
+        install_context_planner(repo)
+
+    skill_path.unlink()
+    installation = install_context_planner(repo).installation
+    skill_path.write_text("modified after installation\n", encoding="utf-8")
+    assert inspect_context_planner(repo).state == "drifted"
+    with pytest.raises(CodeGraphOnboardingError, match="refusing to remove"):
+        remove_context_planner(repo, installation)
+
+    marker_repo = _repository(tmp_path, "marker-repo")
+    marker_path = marker_repo / ".claude/CLAUDE.md"
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text(
+        "<!-- codenib:context-planner:start -->\n"
+        "user-owned planner block\n"
+        "<!-- codenib:context-planner:end -->\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CodeGraphOnboardingError, match="unmanaged or modified"):
+        install_context_planner(marker_repo)
+
+
+def test_context_planner_uninstall_removes_only_managed_content(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    claude_path = repo / ".claude/CLAUDE.md"
+    claude_path.parent.mkdir(parents=True)
+    claude_path.write_text("# Keep this\n", encoding="utf-8")
+    installation = install_context_planner(repo).installation
+
+    removed = remove_context_planner(repo, installation)
+
+    assert ".claude/skills/context-planner/SKILL.md" in removed
+    assert ".claude/CLAUDE.md" in removed
+    assert not (repo / ".claude/skills/context-planner/SKILL.md").exists()
+    assert claude_path.read_text(encoding="utf-8") == "# Keep this\n"
+
+
+def test_cli_context_planner_uninstall_updates_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = _repository(tmp_path)
+    monkeypatch.setenv("CODENIB_HOME", str(tmp_path / "state"))
+    installation = install_context_planner(repo).installation
+    receipt = CodeGraphReceipt(repo, _server(repo), ()).with_context_planner(
+        installation
+    )
+    write_codegraph_receipt(receipt)
+
+    args = cli.build_parser().parse_args(
+        ["codegraph", "uninstall", str(repo), "--remove-context-planner"]
+    )
+
+    assert cli._run_codegraph_uninstall(args) == 0
+    assert not (repo / ".claude/skills/context-planner/SKILL.md").exists()
+    assert not (repo / ".claude/CLAUDE.md").exists()
+    assert not codegraph_receipt_path(repo).exists()
+    assert "context-planner: removed" in capsys.readouterr().out
+
+
+def test_context_planner_receipt_type_has_expected_shape() -> None:
+    installation = ContextPlannerInstallation("a" * 64, "b" * 64, True, False)
+
+    assert installation.to_dict() == {
+        "skill_path": ".claude/skills/context-planner/SKILL.md",
+        "skill_sha256": "a" * 64,
+        "claude_path": ".claude/CLAUDE.md",
+        "claude_block_sha256": "b" * 64,
+        "skill_created": True,
+        "claude_created": False,
+    }
+
+
+def test_context_planner_instruction_assets_are_packaged() -> None:
+    from importlib.resources import files
+
+    package = files("codenib.agent.instructions.context_planner")
+
+    assert package.joinpath("SKILL.md").is_file()
+    assert package.joinpath("CLAUDE.md.fragment").is_file()
 
 
 @pytest.mark.parametrize(
@@ -523,6 +674,82 @@ def test_init_is_idempotent_and_writes_no_repository_files(
     assert "CodeGraph is ready" in capsys.readouterr().out
 
 
+def test_init_opt_in_installs_context_planner_and_records_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import codenib.codegraph_onboarding as onboarding
+
+    repo = _repository(tmp_path)
+    _initialize_git_repository(repo)
+    monkeypatch.setenv("CODENIB_HOME", str(tmp_path / "state"))
+    configured: dict[str, MCPServerSpec] = {}
+
+    monkeypatch.setattr(
+        onboarding,
+        "resolve_requested_clients",
+        lambda _requested: ("claude",),
+    )
+    monkeypatch.setattr(
+        onboarding,
+        "resolve_codenib_command",
+        lambda _explicit=None: ("/opt/codenib/bin/codenib", ()),
+    )
+    monkeypatch.setattr(
+        onboarding,
+        "inspect_server_command",
+        lambda *_args, **_kwargs: SimpleNamespace(ready=True, detail="ready"),
+    )
+
+    def inspect(client, server, _repo):
+        current = configured.get(client)
+        return ClientInspection(
+            client,
+            True,
+            current is not None,
+            current == server,
+            "configuration matches" if current == server else "not configured",
+        )
+
+    monkeypatch.setattr(onboarding, "inspect_client_registration", inspect)
+    monkeypatch.setattr(
+        onboarding,
+        "add_client_registration",
+        lambda client, server, _repo: configured.update({client: server}),
+    )
+    monkeypatch.setattr(
+        cli, "_codegraph_toolchain_plan", lambda *_args: _ready_plan(repo)
+    )
+    monkeypatch.setattr(cli, "_require_modules", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_check_view_dependencies", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "index_repository",
+        lambda *_args, **_kwargs: (_manifest(repo), []),
+    )
+    monkeypatch.setattr(cli, "_print_index_summary", lambda *_args: None)
+
+    args = cli.build_parser().parse_args(
+        [
+            "codegraph",
+            "init",
+            str(repo),
+            "--agent",
+            "claude",
+            "--install-context-planner",
+        ]
+    )
+
+    assert cli._run_codegraph_init(args) == 0
+    receipt = load_codegraph_receipt(repo)
+    assert receipt is not None
+    assert receipt.context_planner is not None
+    assert inspect_context_planner(repo, receipt).state == "current"
+    assert (repo / ".claude/skills/context-planner/SKILL.md").is_file()
+    assert "Context planner: installed" in capsys.readouterr().out
+
+
 def test_init_rejects_dirty_checkout_before_toolchain_or_index_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -672,6 +899,7 @@ def test_dry_run_reports_project_prerequisites_and_exits_nonzero(
             "go",
             "--exclude-dir",
             "generated/api",
+            "--install-context-planner",
             "--dry-run",
         ]
     )
@@ -680,8 +908,29 @@ def test_dry_run_reports_project_prerequisites_and_exits_nonzero(
     output = capsys.readouterr().out
     assert "Source selection: replace (generated/api)" in output
     assert "prerequisite: Go project prerequisite go.mod" in output
+    assert "context-planner: Skill create; CLAUDE.md create" in output
     assert "Readiness:  blocked" in output
     assert "no tools, indexes, receipts, or clients changed" in output
+    assert not (repo / ".claude").exists()
+
+
+def test_context_planner_checkout_guard_rejects_unrelated_changes(
+    tmp_path: Path,
+) -> None:
+    repo = _repository(tmp_path)
+    _initialize_git_repository(repo)
+    expected = cli._codegraph_checkout_snapshot(repo)
+    (repo / ".claude/CLAUDE.md").parent.mkdir(parents=True)
+    (repo / ".claude/CLAUDE.md").write_text("managed\n", encoding="utf-8")
+    (repo / "unrelated.txt").write_text("not planner output\n", encoding="utf-8")
+
+    with pytest.raises(cli.CLIError, match="changed the target checkout"):
+        cli._require_unchanged_codegraph_checkout(
+            repo,
+            expected,
+            stage="context-planner installation",
+            allowed_paths=(".claude/CLAUDE.md",),
+        )
 
 
 def test_init_does_not_overwrite_registration_created_during_indexing(
@@ -860,6 +1109,7 @@ def test_status_json_is_nonzero_without_managed_clients(
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
     assert report["clients"] == []
+    assert report["context_planner"]["state"] == "missing"
 
 
 def test_human_status_does_not_call_a_graph_only_index_current(

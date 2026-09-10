@@ -2207,9 +2207,21 @@ def _require_unchanged_codegraph_checkout(
     expected: bytes,
     *,
     stage: str,
+    allowed_paths: Sequence[str] = (),
 ) -> None:
     observed = _codegraph_checkout_snapshot(repo_path)
     if observed != expected:
+        if allowed_paths:
+            records = {
+                item[3:]
+                for item in observed.decode("utf-8", errors="surrogateescape").split(
+                    "\0"
+                )
+                if len(item) >= 4
+            }
+            allowed = set(allowed_paths)
+            if records and records.issubset(allowed):
+                return
         raise CLIError(
             f"CodeGraph {stage} changed the target checkout; inspect `git status` "
             "and restore or commit the affected files before retrying"
@@ -2223,6 +2235,7 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
         add_client_registration,
         inspect_client_registration,
         inspect_server_command,
+        install_context_planner,
         write_codegraph_receipt,
     )
     from .toolchains import install_requirements
@@ -2259,6 +2272,16 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
             "stash tracked and untracked changes before retrying"
         )
     plan = _codegraph_toolchain_plan(repo_path, languages)
+    planner_plan = None
+    if args.install_context_planner:
+        try:
+            planner_plan = install_context_planner(
+                repo_path,
+                receipt=receipt,
+                dry_run=True,
+            )
+        except (CodeGraphOnboardingError, OSError) as exc:
+            raise _codegraph_error(exc) from exc
 
     if args.dry_run:
         try:
@@ -2292,12 +2315,21 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
         for client in clients:
             action = "reuse" if observed[client].matches else "add"
             print(f"  {client}: {action} {server.name}")
+        if planner_plan is not None:
+            print(
+                "  context-planner: "
+                f"Skill {planner_plan.skill_action}; "
+                f"CLAUDE.md {planner_plan.claude_action}"
+            )
         ready_after_install = not manual and not project_blockers
         print(
             "Readiness:  "
             + ("ready after planned tool install" if ready_after_install else "blocked")
         )
-        print("Dry run complete; no tools, indexes, receipts, or clients changed.")
+        print(
+            "Dry run complete; no tools, indexes, receipts, or clients changed; "
+            "no instruction files changed."
+        )
         return 0 if ready_after_install else 1
 
     _require_modules(
@@ -2389,6 +2421,27 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
         stage="agent registration",
     )
 
+    if args.install_context_planner:
+        try:
+            planner_plan = install_context_planner(
+                repo_path,
+                receipt=managed,
+                dry_run=False,
+            )
+            managed = managed.with_context_planner(planner_plan.installation)
+            write_codegraph_receipt(managed)
+        except (CodeGraphOnboardingError, OSError) as exc:
+            raise _codegraph_error(exc) from exc
+        _require_unchanged_codegraph_checkout(
+            repo_path,
+            checkout_snapshot,
+            stage="context-planner installation",
+            allowed_paths=(
+                ".claude/skills/context-planner/SKILL.md",
+                ".claude/CLAUDE.md",
+            ),
+        )
+
     print("\nCodeGraph is ready for coding agents.")
     print(f"MCP server: {server.name}")
     print(f"Clients:    {', '.join(clients)}")
@@ -2398,6 +2451,8 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
         "Try asking your agent to use explore_context before editing and "
         "dependency_subgraph for impact analysis."
     )
+    if args.install_context_planner:
+        print("Context planner: installed in .claude/skills and .claude/CLAUDE.md")
     return 0
 
 
@@ -2535,6 +2590,7 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
         CodeGraphOnboardingError,
         codegraph_receipt_path,
         inspect_client_registration,
+        inspect_context_planner,
         inspect_server_command,
         load_codegraph_receipt,
     )
@@ -2558,6 +2614,12 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
                 "detail": "integration receipt is invalid",
             },
             "clients": [],
+            "context_planner": {
+                "state": "missing",
+                "skill_state": "missing",
+                "claude_state": "missing",
+                "detail": "integration receipt is invalid",
+            },
             "receipt_error": str(exc),
         }
     clients: list[dict[str, object]] = []
@@ -2604,6 +2666,7 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
     clients_ready = bool(clients) and all(
         item["receipt_state"] == "configured" and item["matches"] for item in clients
     )
+    planner = inspect_context_planner(repo_path, receipt)
     server = (
         {
             "name": receipt.server.name,
@@ -2627,6 +2690,13 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
         "server_command": server_command,
         "server": server,
         "clients": clients,
+        "context_planner": {
+            "state": planner.state,
+            "skill_state": planner.skill_state,
+            "claude_state": planner.claude_state,
+            "detail": planner.detail,
+            "managed": receipt is not None and receipt.context_planner is not None,
+        },
         "receipt": (
             str(codegraph_receipt_path(repo_path)) if receipt is not None else None
         ),
@@ -2682,6 +2752,14 @@ def _run_codegraph_status(args: argparse.Namespace) -> int:
             f"  [{marker:<7}] {client['name']}: {client['detail']} "
             f"({client['scope']})"
         )
+    planner = report.get(
+        "context_planner",
+        {"state": "missing", "detail": "not installed"},
+    )
+    print(
+        "Planner:   "
+        f"{planner.get('state', 'missing')} ({planner.get('detail', 'not installed')})"
+    )
     return 0 if report["ready"] else 1
 
 
@@ -2706,9 +2784,11 @@ def _run_codegraph_uninstall(args: argparse.Namespace) -> int:
     from .codegraph_onboarding import (
         CodeGraphOnboardingError,
         inspect_client_registration,
+        inspect_context_planner,
         load_codegraph_receipt,
         remove_client_registration,
         remove_codegraph_receipt,
+        remove_context_planner,
         write_codegraph_receipt,
     )
 
@@ -2758,15 +2838,47 @@ def _run_codegraph_uninstall(args: argparse.Namespace) -> int:
                         f"{client} still reports MCP server {receipt.server.name}"
                     )
             receipt = receipt.without_client(client)
-            if receipt.clients:
+            if receipt.clients or receipt.context_planner is not None:
                 write_codegraph_receipt(receipt)
             else:
                 remove_codegraph_receipt(receipt)
             print(f"{client}: removed {receipt.server.name}")
+        if args.remove_context_planner and receipt.context_planner is not None:
+            planner = inspect_context_planner(repo_path, receipt)
+            if planner.state == "drifted":
+                raise CodeGraphOnboardingError(
+                    "refusing to remove drifted context-planner files; restore them "
+                    "or remove them manually"
+                )
+            if args.dry_run:
+                print("context-planner: would remove managed Skill and guidance")
+            else:
+                removed = remove_context_planner(
+                    repo_path,
+                    receipt.context_planner,
+                )
+                receipt = receipt.without_context_planner()
+                if receipt.clients:
+                    write_codegraph_receipt(receipt)
+                else:
+                    remove_codegraph_receipt(receipt)
+                print(
+                    "context-planner: removed "
+                    + (
+                        ", ".join(removed)
+                        if removed
+                        else "managed files already absent"
+                    )
+                )
         if args.dry_run:
             print("Dry run complete; no client configuration or receipt changed.")
         elif receipt.clients:
             print("CodeGraph indexes were preserved for the remaining clients.")
+        elif receipt.context_planner is not None:
+            print(
+                "Client registrations removed; context-planner files remain "
+                "managed until --remove-context-planner is supplied."
+            )
         else:
             print("Agent registrations removed; CodeGraph indexes were preserved.")
         return 0
@@ -3333,7 +3445,18 @@ def build_parser() -> argparse.ArgumentParser:
     codegraph_init_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="show toolchain, index, and client actions without changing state",
+        help=(
+            "show toolchain, index, client, and optional planner actions without "
+            "changing state"
+        ),
+    )
+    codegraph_init_parser.add_argument(
+        "--install-context-planner",
+        action="store_true",
+        help=(
+            "install the project-local context-planner Skill and managed "
+            ".claude/CLAUDE.md guidance"
+        ),
     )
     codegraph_init_parser.set_defaults(handler=_run_codegraph_init)
 
@@ -3370,7 +3493,15 @@ def build_parser() -> argparse.ArgumentParser:
     codegraph_uninstall_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="show removals without changing client configuration or receipts",
+        help=(
+            "show client and optional context-planner removals without changing "
+            "configuration or receipts"
+        ),
+    )
+    codegraph_uninstall_parser.add_argument(
+        "--remove-context-planner",
+        action="store_true",
+        help="remove unchanged project-local context-planner files managed by CodeNib",
     )
     codegraph_uninstall_parser.set_defaults(handler=_run_codegraph_uninstall)
 
