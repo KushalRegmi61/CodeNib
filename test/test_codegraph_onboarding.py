@@ -211,6 +211,7 @@ def test_context_planner_install_is_idempotent_and_receiptable(tmp_path: Path) -
     assert dry_run.skill_action == "create"
     assert dry_run.claude_action == "create"
     assert not (repo / ".claude").exists()
+    assert not (repo / "CLAUDE.md").exists()
 
     first = install_context_planner(repo)
     second = install_context_planner(repo)
@@ -226,7 +227,7 @@ def test_context_planner_install_is_idempotent_and_receiptable(tmp_path: Path) -
     assert (
         repo / ".claude/skills/context-planner/references/mcp-routing.md"
     ).is_file()
-    claude = (repo / ".claude/CLAUDE.md").read_text(encoding="utf-8")
+    claude = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     assert "local rules" not in claude
     assert "<!-- codenib:context-planner:start -->" in claude
     assert inspect_context_planner(repo).state == "current"
@@ -244,8 +245,7 @@ def test_context_planner_install_is_idempotent_and_receiptable(tmp_path: Path) -
 
 def test_context_planner_preserves_existing_claude_rules(tmp_path: Path) -> None:
     repo = _repository(tmp_path)
-    claude_path = repo / ".claude/CLAUDE.md"
-    claude_path.parent.mkdir(parents=True)
+    claude_path = repo / "CLAUDE.md"
     claude_path.write_text("# Existing rules\n\nKeep this text.\n", encoding="utf-8")
 
     plan = install_context_planner(repo)
@@ -254,6 +254,96 @@ def test_context_planner_preserves_existing_claude_rules(tmp_path: Path) -> None
     assert plan.claude_action == "append"
     assert content.startswith("# Existing rules\n\nKeep this text.")
     assert content.count("codenib:context-planner:start") == 1
+    # Block is appended last, after existing rules.
+    assert content.rstrip().endswith("<!-- codenib:context-planner:end -->")
+
+
+def test_context_planner_migrates_legacy_claude_block_to_root(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    first = install_context_planner(repo)
+    root = repo / "CLAUDE.md"
+    legacy = repo / ".claude/CLAUDE.md"
+    block = root.read_text(encoding="utf-8")
+
+    # Simulate a pre-migration checkout: block lives in the legacy path.
+    root.unlink()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(block, encoding="utf-8")
+
+    plan = install_context_planner(repo)
+    assert plan.claude_action == "create"
+    assert plan.legacy_claude_action == "migrate"
+    assert root.read_text(encoding="utf-8") == block
+    assert not legacy.exists()
+    assert inspect_context_planner(repo).state == "current"
+
+    # Second run is a no-op.
+    second = install_context_planner(repo)
+    assert second.claude_action == "current"
+    assert second.legacy_claude_action == "none"
+    assert first.installation.claude_block_sha256 == second.installation.claude_block_sha256
+
+
+def test_context_planner_migrates_legacy_block_and_appends_to_existing_root(
+    tmp_path: Path,
+) -> None:
+    repo = _repository(tmp_path)
+    probe = install_context_planner(repo)
+    block = (repo / "CLAUDE.md").read_text(encoding="utf-8")
+    legacy = repo / ".claude/CLAUDE.md"
+    root = repo / "CLAUDE.md"
+    root.write_text("# Existing rules\n\nKeep this text.\n", encoding="utf-8")
+    legacy.write_text(block, encoding="utf-8")
+
+    plan = install_context_planner(repo)
+    content = root.read_text(encoding="utf-8")
+
+    assert plan.claude_action == "append"
+    assert plan.legacy_claude_action == "migrate"
+    assert content.startswith("# Existing rules\n\nKeep this text.")
+    assert content.count("codenib:context-planner:start") == 1
+    assert content.rstrip().endswith("<!-- codenib:context-planner:end -->")
+    assert not legacy.exists()
+    assert probe.installation.claude_block_sha256 == plan.installation.claude_block_sha256
+
+
+def test_context_planner_inspect_flags_legacy_block_as_drifted(
+    tmp_path: Path,
+) -> None:
+    repo = _repository(tmp_path)
+    install_context_planner(repo)
+    root = repo / "CLAUDE.md"
+    legacy = repo / ".claude/CLAUDE.md"
+    block = root.read_text(encoding="utf-8")
+    root.unlink()
+    legacy.write_text(block, encoding="utf-8")
+
+    inspection = inspect_context_planner(repo)
+    assert inspection.state == "drifted"
+    assert "legacy" in inspection.detail
+
+
+def test_legacy_schema_three_receipt_path_is_accepted(tmp_path: Path) -> None:
+    from codenib.codegraph_onboarding import CONTEXT_PLANNER_LEGACY_CLAUDE_PATH
+
+    repo = _repository(tmp_path)
+    installation = install_context_planner(repo).installation
+    receipt = CodeGraphReceipt(repo, _server(repo), ()).with_context_planner(
+        installation
+    )
+    path = write_codegraph_receipt(receipt)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    payload["context_planner"]["claude_path"] = (
+        CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix()
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_codegraph_receipt(repo)
+    assert loaded is not None
+    assert loaded.context_planner is not None
+    refreshed = install_context_planner(repo, receipt=loaded)
+    assert refreshed.claude_action == "current"
 
 
 def test_context_planner_refuses_unmanaged_or_modified_files(tmp_path: Path) -> None:
@@ -273,8 +363,7 @@ def test_context_planner_refuses_unmanaged_or_modified_files(tmp_path: Path) -> 
         remove_context_planner(repo, installation)
 
     marker_repo = _repository(tmp_path, "marker-repo")
-    marker_path = marker_repo / ".claude/CLAUDE.md"
-    marker_path.parent.mkdir(parents=True)
+    marker_path = marker_repo / "CLAUDE.md"
     marker_path.write_text(
         "<!-- codenib:context-planner:start -->\n"
         "user-owned planner block\n"
@@ -287,15 +376,14 @@ def test_context_planner_refuses_unmanaged_or_modified_files(tmp_path: Path) -> 
 
 def test_context_planner_uninstall_removes_only_managed_content(tmp_path: Path) -> None:
     repo = _repository(tmp_path)
-    claude_path = repo / ".claude/CLAUDE.md"
-    claude_path.parent.mkdir(parents=True)
+    claude_path = repo / "CLAUDE.md"
     claude_path.write_text("# Keep this\n", encoding="utf-8")
     installation = install_context_planner(repo).installation
 
     removed = remove_context_planner(repo, installation)
 
     assert ".claude/skills/context-planner/SKILL.md" in removed
-    assert ".claude/CLAUDE.md" in removed
+    assert "CLAUDE.md" in removed
     assert not (repo / ".claude/skills/context-planner/SKILL.md").exists()
     assert not (repo / ".claude/agents/scope-search.md").exists()
     assert not (
@@ -315,7 +403,7 @@ def test_context_planner_refuses_modified_reference_asset(tmp_path: Path) -> Non
         remove_context_planner(repo, installation)
 
 
-def test_schema_two_receipt_is_read_and_rewritten_as_schema_three(
+def test_schema_two_receipt_is_read_and_rewritten_as_schema_four(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,7 +432,7 @@ def test_schema_two_receipt_is_read_and_rewritten_as_schema_three(
     upgraded = write_codegraph_receipt(
         loaded.with_context_planner(refreshed.installation)
     )
-    assert json.loads(upgraded.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert json.loads(upgraded.read_text(encoding="utf-8"))["schema_version"] == 4
     assert len(loaded.with_context_planner(refreshed.installation).context_planner.managed_files) == 6
 
 
@@ -367,7 +455,7 @@ def test_cli_context_planner_uninstall_updates_receipt(
 
     assert cli._run_codegraph_uninstall(args) == 0
     assert not (repo / ".claude/skills/context-planner/SKILL.md").exists()
-    assert not (repo / ".claude/CLAUDE.md").exists()
+    assert not (repo / "CLAUDE.md").exists()
     assert not codegraph_receipt_path(repo).exists()
     assert "context-planner: removed" in capsys.readouterr().out
 
@@ -378,7 +466,7 @@ def test_context_planner_receipt_type_has_expected_shape() -> None:
     assert installation.to_dict() == {
         "skill_path": ".claude/skills/context-planner/SKILL.md",
         "skill_sha256": "a" * 64,
-        "claude_path": ".claude/CLAUDE.md",
+        "claude_path": "CLAUDE.md",
         "claude_block_sha256": "b" * 64,
         "skill_created": True,
         "claude_created": False,
@@ -980,8 +1068,7 @@ def test_context_planner_checkout_guard_rejects_unrelated_changes(
     repo = _repository(tmp_path)
     _initialize_git_repository(repo)
     expected = cli._codegraph_checkout_snapshot(repo)
-    (repo / ".claude/CLAUDE.md").parent.mkdir(parents=True)
-    (repo / ".claude/CLAUDE.md").write_text("managed\n", encoding="utf-8")
+    (repo / "CLAUDE.md").write_text("managed\n", encoding="utf-8")
     (repo / "unrelated.txt").write_text("not planner output\n", encoding="utf-8")
 
     with pytest.raises(cli.CLIError, match="changed the target checkout"):
@@ -989,7 +1076,7 @@ def test_context_planner_checkout_guard_rejects_unrelated_changes(
             repo,
             expected,
             stage="context-planner installation",
-            allowed_paths=(".claude/CLAUDE.md",),
+            allowed_paths=("CLAUDE.md",),
         )
 
 

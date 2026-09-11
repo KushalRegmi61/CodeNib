@@ -2231,6 +2231,7 @@ def _require_unchanged_codegraph_checkout(
 
 def _run_codegraph_init(args: argparse.Namespace) -> int:
     from .codegraph_onboarding import (
+        CONTEXT_PLANNER_LEGACY_CLAUDE_PATH,
         CONTEXT_PLANNER_MANAGED_PATHS,
         CodeGraphOnboardingError,
         CodeGraphReceipt,
@@ -2440,9 +2441,10 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
             repo_path,
             checkout_snapshot,
             stage="context-planner installation",
-            allowed_paths=(
+            allowed_paths=[
                 path.as_posix() for path in CONTEXT_PLANNER_MANAGED_PATHS
-            ),
+            ]
+            + [CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix()],
         )
 
     print("\nCodeGraph is ready for coding agents.")
@@ -2457,7 +2459,7 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
     if args.install_context_planner:
         print(
             "Context planner: installed in .claude/skills, .claude/agents, "
-            "and .claude/CLAUDE.md"
+            "and CLAUDE.md"
         )
     return 0
 
@@ -3465,7 +3467,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "install the project-local context-planner Skill and managed "
-            ".claude/CLAUDE.md guidance"
+            "CLAUDE.md guidance"
         ),
     )
     codegraph_init_parser.set_defaults(handler=_run_codegraph_init)

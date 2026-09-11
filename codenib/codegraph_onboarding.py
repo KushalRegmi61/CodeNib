@@ -28,13 +28,14 @@ from ._version import package_version
 from .paths import repo_state_dir, repository_state_key
 
 CODEGRAPH_CLIENTS = ("codex", "claude")
-CODEGRAPH_RECEIPT_SCHEMA = 3
-_SUPPORTED_RECEIPT_SCHEMAS = frozenset({1, 2, CODEGRAPH_RECEIPT_SCHEMA})
+CODEGRAPH_RECEIPT_SCHEMA = 4
+_SUPPORTED_RECEIPT_SCHEMAS = frozenset({1, 2, 3, CODEGRAPH_RECEIPT_SCHEMA})
 CODEGRAPH_RECEIPT_DIRNAME = "codegraph"
 CODEGRAPH_RECEIPT_FILENAME = "agent-integrations.json"
 
 CONTEXT_PLANNER_SKILL_PATH = Path(".claude/skills/context-planner/SKILL.md")
-CONTEXT_PLANNER_CLAUDE_PATH = Path(".claude/CLAUDE.md")
+CONTEXT_PLANNER_CLAUDE_PATH = Path("CLAUDE.md")
+CONTEXT_PLANNER_LEGACY_CLAUDE_PATH = Path(".claude/CLAUDE.md")
 CONTEXT_PLANNER_ASSET_PATHS = (
     Path(".claude/skills/context-planner/references/mcp-routing.md"),
     Path(".claude/skills/context-planner/references/packet-contract.md"),
@@ -143,6 +144,7 @@ class ContextPlannerInstallPlan:
     skill_action: str
     claude_action: str
     asset_actions: tuple[tuple[str, str], ...] = ()
+    legacy_claude_action: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,7 +421,10 @@ def _parse_context_planner_receipt(
         raise CodeGraphOnboardingError(
             "invalid CodeGraph integration receipt field: context_planner.skill_path"
         )
-    if item["claude_path"] != CONTEXT_PLANNER_CLAUDE_PATH.as_posix():
+    if item["claude_path"] not in {
+        CONTEXT_PLANNER_CLAUDE_PATH.as_posix(),
+        CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix(),
+    }:
         raise CodeGraphOnboardingError(
             "invalid CodeGraph integration receipt field: context_planner.claude_path"
         )
@@ -685,13 +690,13 @@ def _extract_context_planner_block(content: str) -> tuple[str, str, str] | None:
         return None
     if starts != 1 or ends != 1:
         raise CodeGraphOnboardingError(
-            "context-planner markers are duplicated or unbalanced in .claude/CLAUDE.md"
+            "context-planner markers are duplicated or unbalanced in CLAUDE.md"
         )
     start = content.index(CONTEXT_PLANNER_MARKER_START)
     end_marker = content.index(CONTEXT_PLANNER_MARKER_END)
     if end_marker < start:
         raise CodeGraphOnboardingError(
-            "context-planner markers are out of order in .claude/CLAUDE.md"
+            "context-planner markers are out of order in CLAUDE.md"
         )
     end = end_marker + len(CONTEXT_PLANNER_MARKER_END)
     if content.startswith("\n", end):
@@ -758,6 +763,8 @@ def _context_planner_plan(
     )
     current_skill = _safe_existing_file(skill_path, label="context-planner Skill")
     current_claude = _safe_existing_file(claude_path, label="CLAUDE.md")
+    legacy_path = repo / CONTEXT_PLANNER_LEGACY_CLAUDE_PATH
+    legacy_claude = _safe_existing_file(legacy_path, label="legacy CLAUDE.md")
     previous = receipt.context_planner if receipt is not None else None
 
     skill_created = current_skill is None
@@ -774,24 +781,63 @@ def _context_planner_plan(
             f"refusing to overwrite unmanaged or modified context-planner Skill: {skill_path}"
         )
 
+    def _is_current_block(value: str) -> bool:
+        return value == block
+
+    def _is_refresh_block(value: str) -> bool:
+        return (
+            previous is not None
+            and _sha256_text(value) == previous.claude_block_sha256
+        )
+
+    legacy_claude_action = "none"
     claude_created = current_claude is None
     if current_claude is None:
-        claude_action = "create"
+        if legacy_claude is not None:
+            legacy_extracted = _extract_context_planner_block(legacy_claude)
+            if legacy_extracted is None:
+                claude_action = "create"
+            else:
+                _legacy_prefix, legacy_block, _legacy_suffix = legacy_extracted
+                if _is_current_block(legacy_block) or _is_refresh_block(
+                    legacy_block
+                ):
+                    claude_action = "create"
+                    legacy_claude_action = "migrate"
+                else:
+                    raise CodeGraphOnboardingError(
+                        "refusing to overwrite an unmanaged or modified "
+                        f"context-planner section in {legacy_path}; move it to "
+                        f"{claude_path} before retrying"
+                    )
+        else:
+            claude_action = "create"
     else:
         extracted = _extract_context_planner_block(current_claude)
         if extracted is None:
             claude_action = "append"
+            if legacy_claude is not None:
+                legacy_extracted = _extract_context_planner_block(legacy_claude)
+                if legacy_extracted is not None:
+                    _legacy_prefix, legacy_block, _legacy_suffix = legacy_extracted
+                    if _is_current_block(legacy_block) or _is_refresh_block(
+                        legacy_block
+                    ):
+                        legacy_claude_action = "migrate"
+                    else:
+                        raise CodeGraphOnboardingError(
+                            "refusing to overwrite an unmanaged or modified "
+                            f"context-planner section in {legacy_path}; move it "
+                            f"to {claude_path} before retrying"
+                        )
         else:
             _prefix, current_block, _suffix = extracted
-            if current_block == block:
+            if _is_current_block(current_block):
                 claude_action = "current"
                 claude_created = (
                     previous.claude_created if previous is not None else False
                 )
-            elif (
-                previous is not None
-                and _sha256_text(current_block) == previous.claude_block_sha256
-            ):
+            elif _is_refresh_block(current_block):
                 claude_action = "refresh"
                 claude_created = previous.claude_created
             else:
@@ -799,6 +845,20 @@ def _context_planner_plan(
                     "refusing to overwrite an unmanaged or modified context-planner "
                     f"section in {claude_path}"
                 )
+            if legacy_claude is not None:
+                legacy_extracted = _extract_context_planner_block(legacy_claude)
+                if legacy_extracted is not None:
+                    _legacy_prefix, legacy_block, _legacy_suffix = legacy_extracted
+                    if _is_current_block(legacy_block) or _is_refresh_block(
+                        legacy_block
+                    ):
+                        legacy_claude_action = "migrate"
+                    else:
+                        raise CodeGraphOnboardingError(
+                            "refusing to overwrite an unmanaged or modified "
+                            f"context-planner section in {legacy_path}; move it "
+                            f"to {claude_path} before retrying"
+                        )
 
     asset_actions: list[tuple[str, str]] = []
     managed_files: list[ManagedPlannerFile] = []
@@ -845,6 +905,7 @@ def _context_planner_plan(
             skill_action,
             claude_action,
             tuple(asset_actions),
+            legacy_claude_action,
         ),
         skill_content,
         block,
@@ -871,6 +932,7 @@ def install_context_planner(
     repo = Path(repository).expanduser().resolve()
     skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
     claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    legacy_path = repo / CONTEXT_PLANNER_LEGACY_CLAUDE_PATH
     if plan.skill_action != "current":
         _atomic_write_text(skill_path, skill_content)
     for relative_path, action in plan.asset_actions:
@@ -886,6 +948,16 @@ def install_context_planner(
             claude_path,
             _replace_context_planner_block(current_claude, block),
         )
+    if plan.legacy_claude_action == "migrate":
+        legacy_content = _safe_existing_file(legacy_path, label="legacy CLAUDE.md")
+        if legacy_content is not None:
+            extracted = _extract_context_planner_block(legacy_content)
+            if extracted is not None:
+                cleaned = _remove_context_planner_block(legacy_content)
+                if cleaned.strip() == "":
+                    legacy_path.unlink()
+                else:
+                    _atomic_write_text(legacy_path, cleaned)
     return plan
 
 
@@ -898,6 +970,7 @@ def inspect_context_planner(
     repo = Path(repository).expanduser().resolve()
     skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
     claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    legacy_path = repo / CONTEXT_PLANNER_LEGACY_CLAUDE_PATH
     try:
         asset_contents, fragment = _context_planner_assets()
         package = importlib.resources.files(
@@ -907,6 +980,7 @@ def inspect_context_planner(
         expected_block = _context_planner_block(fragment)
         skill = _safe_existing_file(skill_path, label="context-planner Skill")
         claude = _safe_existing_file(claude_path, label="CLAUDE.md")
+        legacy = _safe_existing_file(legacy_path, label="legacy CLAUDE.md")
         if skill is None:
             skill_state = "missing"
         elif skill == skill_content:
@@ -950,12 +1024,21 @@ def inspect_context_planner(
         state = "missing"
     else:
         state = "current"
+    legacy_state = "absent"
+    if legacy is not None:
+        legacy_extracted = _extract_context_planner_block(legacy)
+        if legacy_extracted is not None:
+            legacy_state = "present"
+    if legacy_state == "present":
+        state = "drifted"
     managed = receipt is not None and receipt.context_planner is not None
     detail = (
         f"Skill {skill_state}; assets "
         f"{sum(state == 'current' for _path, state in asset_states)}/"
         f"{len(asset_states)} current; CLAUDE.md {claude_state}"
     )
+    if legacy_state == "present":
+        detail += "; legacy .claude/CLAUDE.md block present, re-run init to migrate"
     if state == "current" and not managed:
         detail += "; installation is not recorded in the CodeNib receipt"
     return ContextPlannerInspection(
@@ -976,6 +1059,7 @@ def remove_context_planner(
     repo = Path(repository).expanduser().resolve()
     skill_path = repo / CONTEXT_PLANNER_SKILL_PATH
     claude_path = repo / CONTEXT_PLANNER_CLAUDE_PATH
+    legacy_path = repo / CONTEXT_PLANNER_LEGACY_CLAUDE_PATH
     removed: list[str] = []
     skill = _safe_existing_file(skill_path, label="context-planner Skill")
     if skill is not None:
@@ -1021,6 +1105,23 @@ def remove_context_planner(
             else:
                 _atomic_write_text(claude_path, _remove_context_planner_block(claude))
             removed.append(str(CONTEXT_PLANNER_CLAUDE_PATH))
+
+    legacy = _safe_existing_file(legacy_path, label="legacy CLAUDE.md")
+    if legacy is not None:
+        extracted = _extract_context_planner_block(legacy)
+        if extracted is not None:
+            if _sha256_text(extracted[1]) != installation.claude_block_sha256:
+                raise CodeGraphOnboardingError(
+                    "refusing to remove a modified context-planner section from "
+                    f"{legacy_path}"
+                )
+            cleaned = _remove_context_planner_block(legacy)
+            if cleaned.strip() == "":
+                legacy_path.unlink()
+            else:
+                _atomic_write_text(legacy_path, cleaned)
+            if str(CONTEXT_PLANNER_LEGACY_CLAUDE_PATH) not in removed:
+                removed.append(str(CONTEXT_PLANNER_LEGACY_CLAUDE_PATH))
     return tuple(removed)
 
 
@@ -1296,6 +1397,7 @@ __all__ = [
     "CODEGRAPH_CLIENTS",
     "CONTEXT_PLANNER_ASSET_PATHS",
     "CONTEXT_PLANNER_CLAUDE_PATH",
+    "CONTEXT_PLANNER_LEGACY_CLAUDE_PATH",
     "CONTEXT_PLANNER_MANAGED_PATHS",
     "CONTEXT_PLANNER_MARKER_END",
     "CONTEXT_PLANNER_MARKER_START",

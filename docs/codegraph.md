@@ -33,7 +33,7 @@ By default CodeNib does not edit Codex TOML, Claude JSON, `.mcp.json`,
 `AGENTS.md`, or `CLAUDE.md` itself. Pass `--install-context-planner` to
 explicitly install the project-local context-planner Skill, its three read-only
 agents, and routing/packet references under `.claude/`, plus a managed section
-in `.claude/CLAUDE.md`; it never writes user-level skill directories or
+in `CLAUDE.md` at the repository root (appended after existing rules); it never writes user-level skill directories or
 `AGENTS.md`. It never writes an index into the target checkout. A readable
 repository slug plus a path digest makes the server name unique, so several
 checkouts can coexist.

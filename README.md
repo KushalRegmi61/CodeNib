@@ -204,7 +204,7 @@ codenib codegraph init /path/to/repository --install-context-planner
 This installs the `context-planner` Skill, its three read-only agents
 (`scope-search`, `impact-navigator`, `evidence-auditor`) with routing and
 packet references under `.claude/`, plus a managed section in
-`.claude/CLAUDE.md`. Re-running `init` reconciles unchanged CodeNib-owned
+`CLAUDE.md` at the repository root. Re-running `init` reconciles unchanged CodeNib-owned
 content and refuses to overwrite manually modified files. See the
 [CodeGraph guide](https://docs.codenib.ai/codegraph/) for the planner routing
 contract and removal behavior.

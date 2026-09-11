@@ -58,7 +58,8 @@ codenib codegraph init /path/to/repository --install-context-planner
 ```
 
 This writes the Skill, three read-only planner agents, and reference files under
-`.claude/`, plus a marked section in `.claude/CLAUDE.md`. The files are
+`.claude/`, plus a marked section in `CLAUDE.md` (repo root, appended last so
+existing rules are preserved). The files are
 project-local; CodeNib does not write `~/.claude`, `.codex/skills`, or
 `AGENTS.md`. Use `--dry-run` to preview every managed file. The installed
 guidance resolves the live MCP registration rather than hardcoding a tool
