@@ -165,6 +165,98 @@ def test_reload_keeps_old_view_when_new_generation_fails(tmp_path: Path) -> None
     assert "bm25" in result.get("view_errors", {})
 
 
+def test_load_defer_views_loads_nothing_at_startup(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, defer_views=True)
+
+    assert context.manifest.commit == _TEST_COMMIT
+    assert context.loaded_views == frozenset()
+    assert context.errors == {}
+
+
+def test_deferred_view_loads_on_first_touch(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, defer_views=True)
+    assert context.loaded_views == frozenset()
+
+    top = context.bm25.search("alphaquas_handler", top_k=5)
+
+    assert top and top[0].node_id.endswith("alphaquas_handler()")
+    assert context.loaded_views == frozenset({"bm25"})
+
+
+def test_deferred_view_loads_once(tmp_path: Path) -> None:
+    calls = []
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, defer_views=True)
+    original = ServerContext._load_bm25
+
+    def counting(self):
+        calls.append(1)
+        return original(self)
+
+    ServerContext._load_bm25 = counting
+    try:
+        first = context.bm25
+        assert context.bm25 is first
+        assert context.loaded_views == frozenset({"bm25"})
+        assert context.reload_if_stale()["reloaded"] is False
+        assert context.bm25 is first
+    finally:
+        ServerContext._load_bm25 = original
+
+    assert len(calls) == 1
+
+
+def test_reload_skips_never_loaded_views(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, defer_views=True)
+    _bm25_manifest(tmp_path, index_dir, "e" * 40).save(manifest_path)
+
+    result = context.reload_if_stale()
+
+    assert result["reloaded"] is True
+    assert result["commit"] == "e" * 40
+    assert context.loaded_views == frozenset()
+    assert context.errors == {}
+
+
+def test_close_does_not_trigger_deferred_loads(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, defer_views=True)
+    context.close()
+
+    assert context.loaded_views == frozenset()
+    assert context.errors == {}
+
+
+def test_lsp_selection_without_graph_loads_nothing(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, defer_views=True)
+
+    assert isinstance(context.lsp_provider_selection, dict)
+    assert context.loaded_views == frozenset()
+    assert context.errors == {}
+
+
 def _bind_fresh_entry(manifest: RepoManifest, entry: IndexEntry) -> IndexEntry:
     entry.commit = manifest.commit
     entry.source_fingerprint = manifest.source_fingerprint

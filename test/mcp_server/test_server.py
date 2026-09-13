@@ -402,7 +402,9 @@ def test_main_applies_log_level_before_initialization(monkeypatch) -> None:
     monkeypatch.setattr(
         server_mod,
         "init_server",
-        lambda manifest_path: events.append(("init", manifest_path)),
+        lambda manifest_path, **kwargs: events.append(
+            ("init", manifest_path, kwargs.get("defer_views"))
+        ),
     )
     monkeypatch.setattr(
         server_mod.mcp,
@@ -414,14 +416,14 @@ def test_main_applies_log_level_before_initialization(monkeypatch) -> None:
 
     assert events == [
         ("log_level", "ERROR"),
-        ("init", "/tmp/m.json"),
+        ("init", "/tmp/m.json", True),
         ("run", "stdio"),
     ]
 
 
 def test_main_applies_requested_tool_surface(monkeypatch) -> None:
     monkeypatch.setattr(server_mod, "set_console_log_level", lambda _level: None)
-    monkeypatch.setattr(server_mod, "init_server", lambda _path: None)
+    monkeypatch.setattr(server_mod, "init_server", lambda _path, **_kwargs: None)
     monkeypatch.setattr(server_mod.mcp, "run", lambda *, transport: None)
 
     server_mod.main(["/tmp/m.json", "--tool-surface", "explore"])
@@ -455,7 +457,7 @@ assert not root_logger.handlers
 def test_main_keeps_startup_traceback_at_debug_level(monkeypatch) -> None:
     failure = ValueError("artifact identity mismatch")
 
-    def fail_init(manifest_path) -> None:
+    def fail_init(manifest_path, **_kwargs) -> None:
         raise failure
 
     monkeypatch.setattr(server_mod, "set_console_log_level", lambda level: None)

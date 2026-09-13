@@ -8,6 +8,13 @@ Holds vector, symbol_graph, BM25, regex, and Zoekt indexes. Each loads
 independently; failures land in ``ctx.errors`` and skipped or failed views keep
 their corresponding attribute at ``None`` so tools can surface a clear error at
 call time rather than blocking server startup.
+
+``ServerContext.load(..., defer_views=True)`` (used by MCP server startup)
+records the wanted views without loading them so the process serves
+immediately. The first read of a deferred view loads exactly that view (plus
+its dependencies) under ``_view_lock``; reads of ``lsp_provider`` pull the
+symbol graph on demand the same way. Status and manifest reporting consult
+:attr:`loaded_views` so they never force a load.
 """
 
 from __future__ import annotations
@@ -62,6 +69,8 @@ _MAX_ARTIFACT_DOCUMENTS_BYTES = 256 * 1024 * 1024
 _VIEW_DEPENDENCIES = {
     "regex_index": frozenset({"symbol_graph"}),
 }
+_LAZY_VIEW_NAMES = frozenset(name for name, _ in _VIEW_LOADERS)
+_LAZY_LSP_NAMES = frozenset({"lsp_provider", "lsp_provider_selection"})
 
 
 def _running_event_loop() -> asyncio.AbstractEventLoop | None:
@@ -344,6 +353,49 @@ class ServerContext:
         init=False,
         repr=False,
     )
+    _deferred_views: frozenset[str] = field(
+        default_factory=frozenset,
+        init=False,
+        repr=False,
+    )
+    _lsp_deferred: bool = field(default=False, init=False, repr=False)
+
+    def __getattribute__(self, name: str) -> Any:
+        """Load a deferred view on first touch.
+
+        Only ``ServerContext.load(..., defer_views=True)`` populates
+        ``_deferred_views``; every other construction path leaves it empty,
+        so this interception is a no-op outside MCP server startup. The
+        membership test runs before any instance access, and loading goes
+        through :meth:`load_views`, which discards the view from the
+        deferred set under ``_view_lock`` before touching disk — concurrent
+        readers block on the lock and share the single load.
+        """
+
+        if name in _LAZY_VIEW_NAMES or name in _LAZY_LSP_NAMES:
+            get = super().__getattribute__
+            try:
+                deferred = get("_deferred_views")
+                lsp_pending = get("_lsp_deferred")
+            except AttributeError:
+                return super().__getattribute__(name)
+            if name in deferred:
+                get("load_views")((name,))
+            elif name in _LAZY_LSP_NAMES and lsp_pending:
+                if "symbol_graph" in deferred:
+                    get("load_views")(("symbol_graph",))
+                else:
+                    get("configure_lsp_provider")(
+                        allow_native=get("_lsp_allow_native"),
+                        native_disabled_reason=get("_lsp_native_disabled_reason"),
+                    )
+        return super().__getattribute__(name)
+
+    @property
+    def lsp_ready(self) -> bool:
+        """Return whether the LSP provider was configured with the graph."""
+
+        return not self._lsp_deferred
 
     def _install_zoekt_snapshot(self, snapshot: ZoektShardSnapshot) -> None:
         """Publish snapshot ownership before a cancellation can escape."""
@@ -474,10 +526,14 @@ class ServerContext:
                 return {"reloaded": False, "reason": "current"}
             previous = self.manifest
             self.manifest = fresh
+            # Never-attempted (still deferred) views have nothing to swap;
+            # the membership test short-circuits before any attribute read
+            # so reload never forces a deferred load.
             candidates = [
                 view
                 for view, _ in _VIEW_LOADERS
-                if getattr(self, view, None) is not None or view in self.errors
+                if view not in self._deferred_views
+                and (getattr(self, view, None) is not None or view in self.errors)
             ]
             if "symbol_graph" in candidates and "regex_index" not in candidates:
                 candidates.append("regex_index")
@@ -570,6 +626,7 @@ class ServerContext:
         manifest_path: RepoManifest | str | Path,
         *,
         views: Iterable[str] | None = None,
+        defer_views: bool = False,
         artifact: Mapping[str, Any] | None = None,
         artifact_binding: ContextArtifactBinding | None = None,
         artifact_reader: PublicationDirectoryReader | None = None,
@@ -583,6 +640,11 @@ class ServerContext:
         selections avoid importing or starting unrelated view runtimes. Each
         selected view is loaded independently; a failure in one does not block
         the others. Failed views are recorded in ``errors``.
+
+        ``defer_views=True`` records the selection without touching disk so
+        the server process serves immediately; each view loads on first
+        touch (see :meth:`__getattribute__`). A one-shot authenticated
+        ``artifact_reader`` cannot be deferred and raises.
         """
         ctx: ServerContext | None = None
         try:
@@ -686,7 +748,14 @@ class ServerContext:
                 else "source binding has not been verified"
             )
 
-            if artifact_reader is None:
+            if defer_views:
+                if artifact_reader is not None:
+                    raise ValueError(
+                        "deferred view loading cannot retain a one-shot "
+                        "authenticated publication reader"
+                    )
+                ctx._deferred_views = frozenset(selected)
+            elif artifact_reader is None:
                 ctx.load_views(selected)
             else:
                 ctx.load_views(selected, artifact_reader=artifact_reader)
@@ -700,18 +769,15 @@ class ServerContext:
             )
 
             cap_summary = {k: v for k, v in manifest.capabilities.items() if v}
-            loaded = [
-                view
-                for view, _ in _VIEW_LOADERS
-                if getattr(ctx, view, None) is not None
-            ]
+            loaded = sorted(ctx.loaded_views)
             logger.info(
                 "ServerContext ready  repo=%s  commit=%s  requested=%s  loaded=%s  "
-                "capabilities=%s  errors=%s",
+                "deferred=%s  capabilities=%s  errors=%s",
                 manifest.repo_path,
                 manifest.commit[:8] if manifest.commit else "N/A",
                 sorted(selected),
                 loaded or "none",
+                sorted(ctx._deferred_views) or "none",
                 cap_summary or "none",
                 list(ctx.errors) or "none",
             )
@@ -763,12 +829,17 @@ class ServerContext:
 
     @property
     def loaded_views(self) -> frozenset[str]:
-        """Return the runtime views currently available in this context."""
+        """Return the runtime views currently available in this context.
+
+        Never forces a deferred load: wanted-but-unloaded views are absent
+        until first touch.
+        """
 
         return frozenset(
             view
             for view, _loader_name in _VIEW_LOADERS
-            if getattr(self, view, None) is not None
+            if view not in self._deferred_views
+            and getattr(self, view, None) is not None
         )
 
     def load_views(
@@ -818,6 +889,10 @@ class ServerContext:
                     )
             if native_index_authorization is not None:
                 self._native_index_authorization = native_index_authorization
+            # Discard before touching disk so a re-entrant first touch (or a
+            # concurrent reader blocked on the lock) shares the single load
+            # instead of starting a second one.
+            self._deferred_views = self._deferred_views - selected
             for view, loader_name in _VIEW_LOADERS:
                 if view not in selected or getattr(self, view, None) is not None:
                     continue
@@ -842,6 +917,10 @@ class ServerContext:
         """Release runtime resources owned by this context."""
 
         with self._view_lock:
+            # Discard first: closing must never force a deferred load, and a
+            # closed context must not resurrect one on later touch.
+            self._deferred_views = frozenset()
+            self._lsp_deferred = False
             deferred: BaseException | None = None
             try:
                 self.end_explore_session()
@@ -953,7 +1032,12 @@ class ServerContext:
         allow_native: bool,
         native_disabled_reason: str = "native_provider_not_authorized",
     ) -> Dict[str, Any]:
-        """Bind a runtime-only provider without mutating persisted artifacts."""
+        """Bind a runtime-only provider without mutating persisted artifacts.
+
+        Reads the graph without forcing a deferred load: a wanted-but-unloaded
+        graph configures the fallback provider and marks :attr:`lsp_ready`
+        False, so the first ``lsp_provider`` read pulls the graph on demand.
+        """
 
         from ..agent.lsp_provider import select_checkout_lsp_provider
 
@@ -962,7 +1046,7 @@ class ServerContext:
         provider, selection = select_checkout_lsp_provider(
             project_root=self.manifest.repo_path,
             languages=self.manifest.languages,
-            symbol_graph=self.symbol_graph,
+            symbol_graph=object.__getattribute__(self, "symbol_graph"),
             source_selection=(
                 self.manifest.source_selection or DEFAULT_REPOSITORY_SOURCE_SELECTION
             ),
@@ -971,6 +1055,7 @@ class ServerContext:
         )
         self.lsp_provider = provider
         self.lsp_provider_selection = selection
+        self._lsp_deferred = "symbol_graph" in self._deferred_views
         return dict(selection)
 
     @classmethod

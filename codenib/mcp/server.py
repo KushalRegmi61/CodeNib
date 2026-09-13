@@ -864,10 +864,12 @@ async def get_manifest() -> dict[str, Any]:
         # Python is the correctness path in Phase 1b; the existing native
         # provider has no digest-verified overlay merge boundary yet.
         workspace.setdefault("native_project_queries", "unavailable")
-        bm25_available = bool(getattr(_ctx.bm25, "project_filter_available", False))
+        bm25_available = "bm25" in _ctx.loaded_views and bool(
+            getattr(_ctx.bm25, "project_filter_available", False)
+        )
         vector_available = (
             any(_ctx.vector.project_filter_available(level) for level in ("l0", "l2"))
-            if _ctx.vector is not None
+            if "vector" in _ctx.loaded_views and _ctx.vector is not None
             else False
         )
         retrieval_available = bm25_available or vector_available
@@ -894,7 +896,7 @@ async def get_manifest() -> dict[str, Any]:
             "commit_verified": False,
             "checkout_state": "not-attested",
         },
-        "lsp_provider": dict(_ctx.lsp_provider_selection),
+        "lsp_provider": dict(_ctx.lsp_provider_selection) if _ctx.lsp_ready else {},
     }
     if _ctx.artifact is not None:
         result["artifact"] = dict(_ctx.artifact)
@@ -933,7 +935,7 @@ def server_status() -> str:
             "Indexes:",
         ]
 
-        if ctx.vector is not None:
+        if "vector" in ctx.loaded_views and ctx.vector is not None:
             stats = ctx.vector.get_stats()
             lines.append(
                 f"  ✓ vector: {ctx.vector.embedding_model} "
@@ -942,24 +944,24 @@ def server_status() -> str:
         else:
             lines.append("  ✗ vector: not_loaded")
 
-        if ctx.bm25 is not None:
+        if "bm25" in ctx.loaded_views and ctx.bm25 is not None:
             lines.append("  ✓ bm25: loaded")
         else:
             lines.append("  ✗ bm25: not_loaded")
 
-        if ctx.symbol_graph is not None:
+        if "symbol_graph" in ctx.loaded_views and ctx.symbol_graph is not None:
             lines.append("  ✓ symbol_graph: loaded")
         else:
             lines.append("  ✗ symbol_graph: not_loaded")
 
-        lsp_selection = ctx.lsp_provider_selection
+        lsp_selection = dict(ctx.lsp_provider_selection) if ctx.lsp_ready else {}
         lines.append(
             "  lsp_provider: "
             f"{lsp_selection.get('backend', 'unavailable')} "
             f"({lsp_selection.get('status', 'unavailable')})"
         )
 
-        if ctx.zoekt is not None:
+        if "zoekt" in ctx.loaded_views and ctx.zoekt is not None:
             lines.append(f"  ✓ zoekt: port={ctx.zoekt.port}")
         else:
             lines.append("  ✗ zoekt: not_loaded")
@@ -1050,11 +1052,14 @@ def init_server(
     artifact: dict[str, Any] | None = None,
     artifact_binding: ContextArtifactBinding | None = None,
     source_binding: RepositorySourceBinding | None = None,
+    defer_views: bool = False,
 ) -> None:
     """Initialize the global ServerContext from a manifest file.
 
     Loads the manifest and opens all available indexes in the
-    module-level ``_ctx``. Safe to call from tests with a temporary
+    module-level ``_ctx``, unless ``defer_views`` records them for
+    load-on-first-touch so the process serves immediately (used by the
+    ``codenib mcp`` entry point). Safe to call from tests with a temporary
     manifest path.
 
     Raises:
@@ -1218,6 +1223,7 @@ def init_server(
                 artifact_binding=artifact_binding,
                 native_index_authorization=native_authorization,
                 source_binding=retained_source,
+                defer_views=defer_views,
             )
             new_context.source_error = source_error
             if resolved_manifest_path is not None and (
@@ -1318,6 +1324,7 @@ def main(argv: list[str] | None = None) -> None:
                         "views": list(artifact.views),
                     },
                     artifact_binding=binding,
+                    defer_views=True,
                 )
             except BaseException:  # noqa: B036 - preserve startup failure
                 try:
@@ -1327,7 +1334,7 @@ def main(argv: list[str] | None = None) -> None:
                 raise
             binding.close()
         else:
-            init_server(manifest_path)
+            init_server(manifest_path, defer_views=True)
         logger.info("Starting MCP server on stdio...")
         mcp.run(transport="stdio")
     except FileNotFoundError as exc:
