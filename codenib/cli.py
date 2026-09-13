@@ -2124,7 +2124,8 @@ def _codegraph_spec_for_args(repo_path: Path, args: argparse.Namespace):
         receipt = load_codegraph_receipt(repo_path)
         explicit = getattr(args, "server_command", None)
         if receipt is not None and explicit is None:
-            return receipt.server, receipt
+            server = receipt.server
+            return server, receipt, _codegraph_hook_argv(server, repo_path)
         command, prefix = resolve_codenib_command(explicit)
         server = make_server_spec(
             repo_path,
@@ -2136,9 +2137,93 @@ def _codegraph_spec_for_args(repo_path: Path, args: argparse.Namespace):
                 "--command differs from the managed MCP registration; run "
                 "`codenib codegraph uninstall` before changing it"
             )
-        return server, receipt
+        return server, receipt, (command, *prefix)
     except (CodeGraphOnboardingError, OSError) as exc:
         raise _codegraph_error(exc) from exc
+
+
+def _codegraph_hook_argv(server, repo_path: Path) -> tuple[str, ...] | None:
+    """Derive the hook runtime argv from the effective MCP server command.
+
+    Returns None when the recorded server command does not carry the
+    expected full-surface MCP suffix, so hook installation degrades to a
+    warning instead of failing init.
+    """
+
+    suffix = ("mcp", str(repo_path), "--tool-surface", "full")
+    invocation = tuple(server.args)
+    if len(invocation) < len(suffix) or tuple(invocation[-len(suffix) :]) != suffix:
+        return None
+    return (server.command, *invocation[: -len(suffix)])
+
+
+def _codegraph_hooks_disabled_by_env() -> bool:
+    return os.environ.get("CI", "").strip().lower() in ("1", "true", "yes")
+
+
+def _codegraph_ensure_hooks(
+    repo_path: Path, args: argparse.Namespace, hook_argv: tuple[str, ...] | None
+) -> None:
+    """Install managed git hooks during init; warn instead of failing."""
+
+    from .codegraph_hooks import (
+        CodeGraphHookError,
+        inspect_hooks,
+        install_hooks,
+        load_hook_receipt,
+        resolve_hook_mode,
+    )
+
+    if getattr(args, "no_hooks", False):
+        print("Hooks:      skipped (--no-hooks)")
+        return
+    if _codegraph_hooks_disabled_by_env():
+        print("Hooks:      skipped (CI environment)")
+        return
+    if hook_argv is None:
+        print(
+            "warning: CodeGraph hooks not installed: unable to derive the "
+            "managed CodeNib command; run `codenib codegraph hook install` "
+            "to enable automatic updates"
+        )
+        return
+    try:
+        mode = resolve_hook_mode(None)
+        batch_size = _resolve_embedding_batch_size(args)
+    except (CodeGraphHookError, CLIError) as exc:
+        print(f"warning: CodeGraph hooks not installed: {exc}")
+        return
+    try:
+        receipt = load_hook_receipt(repo_path)
+    except (CodeGraphHookError, OSError):
+        receipt = None
+    if (
+        receipt is not None
+        and receipt.mode == mode
+        and receipt.batch_size == batch_size
+        and receipt.command == tuple(hook_argv)
+        and all(item.current for item in inspect_hooks(repo_path, receipt))
+    ):
+        print("Hooks:      current (automatic updates enabled)")
+        return
+    try:
+        installed = install_hooks(
+            repo_path,
+            mode=mode,
+            batch_size=batch_size,
+            codenib_argv=tuple(hook_argv),
+        )
+    except (CodeGraphHookError, OSError) as exc:
+        print(
+            "warning: CodeGraph hooks not installed: "
+            f"{exc}; run `codenib codegraph hook install {repo_path}` "
+            "to enable automatic updates"
+        )
+        return
+    print(
+        f"Hooks:      installed ({installed.mode}; automatic updates on "
+        "commit, merge, checkout, and rewrite)"
+    )
 
 
 def _codegraph_clients_for_init(args: argparse.Namespace) -> tuple[str, ...]:
@@ -2287,7 +2372,7 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
 
     repo_path = resolve_repo_path(args.repo)
     resolved_selection = _resolve_repository_source_selection(repo_path, args)
-    server, receipt = _codegraph_spec_for_args(repo_path, args)
+    server, receipt, hook_argv = _codegraph_spec_for_args(repo_path, args)
     try:
         server_inspection = inspect_server_command(server, repo_path)
     except CodeGraphOnboardingError as exc:
@@ -2368,14 +2453,25 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
             )
             for path, action in planner_plan.asset_actions:
                 print(f"  context-planner asset: {action} {path}")
+        if getattr(args, "no_hooks", False):
+            print("  hooks: skipped (--no-hooks)")
+        elif _codegraph_hooks_disabled_by_env():
+            print("  hooks: skipped (CI environment)")
+        elif hook_argv is None:
+            print("  hooks: skipped (managed command unavailable)")
+        else:
+            print(
+                "  hooks: install post-commit, post-checkout, post-merge, "
+                "post-rewrite"
+            )
         ready_after_install = not manual and not project_blockers
         print(
             "Readiness:  "
             + ("ready after planned tool install" if ready_after_install else "blocked")
         )
         print(
-            "Dry run complete; no tools, indexes, receipts, or clients changed; "
-            "no instruction files changed."
+            "Dry run complete; no tools, indexes, receipts, clients, or hooks "
+            "changed; no instruction files changed."
         )
         return 0 if ready_after_install else 1
 
@@ -2486,6 +2582,8 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
             allowed_paths=[path.as_posix() for path in CONTEXT_PLANNER_MANAGED_PATHS]
             + [CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix()],
         )
+
+    _codegraph_ensure_hooks(repo_path, args, hook_argv)
 
     print("\nCodeGraph is ready for coding agents.")
     print(f"MCP server: {server.name}")
@@ -3514,6 +3612,11 @@ def build_parser() -> argparse.ArgumentParser:
             "install the project-local context-planner Skill and managed "
             "CLAUDE.md guidance"
         ),
+    )
+    codegraph_init_parser.add_argument(
+        "--no-hooks",
+        action="store_true",
+        help="skip installing managed git hooks for automatic graph updates",
     )
     codegraph_init_parser.set_defaults(handler=_run_codegraph_init)
 

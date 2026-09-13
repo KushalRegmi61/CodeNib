@@ -224,9 +224,7 @@ def test_context_planner_install_is_idempotent_and_receiptable(tmp_path: Path) -
     assert all(action == "current" for _path, action in second.asset_actions)
     assert (repo / ".claude/skills/context-planner/SKILL.md").is_file()
     assert (repo / ".claude/agents/scope-search.md").is_file()
-    assert (
-        repo / ".claude/skills/context-planner/references/mcp-routing.md"
-    ).is_file()
+    assert (repo / ".claude/skills/context-planner/references/mcp-routing.md").is_file()
     claude = (repo / "CLAUDE.md").read_text(encoding="utf-8")
     assert "local rules" not in claude
     assert "<!-- codenib:context-planner:start -->" in claude
@@ -281,7 +279,10 @@ def test_context_planner_migrates_legacy_claude_block_to_root(tmp_path: Path) ->
     second = install_context_planner(repo)
     assert second.claude_action == "current"
     assert second.legacy_claude_action == "none"
-    assert first.installation.claude_block_sha256 == second.installation.claude_block_sha256
+    assert (
+        first.installation.claude_block_sha256
+        == second.installation.claude_block_sha256
+    )
 
 
 def test_context_planner_migrates_legacy_block_and_appends_to_existing_root(
@@ -304,7 +305,9 @@ def test_context_planner_migrates_legacy_block_and_appends_to_existing_root(
     assert content.count("codenib:context-planner:start") == 1
     assert content.rstrip().endswith("<!-- codenib:context-planner:end -->")
     assert not legacy.exists()
-    assert probe.installation.claude_block_sha256 == plan.installation.claude_block_sha256
+    assert (
+        probe.installation.claude_block_sha256 == plan.installation.claude_block_sha256
+    )
 
 
 def test_context_planner_inspect_flags_legacy_block_as_drifted(
@@ -334,9 +337,9 @@ def test_legacy_schema_three_receipt_path_is_accepted(tmp_path: Path) -> None:
     path = write_codegraph_receipt(receipt)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["schema_version"] = 3
-    payload["context_planner"]["claude_path"] = (
-        CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix()
-    )
+    payload["context_planner"][
+        "claude_path"
+    ] = CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix()
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = load_codegraph_receipt(repo)
@@ -399,7 +402,9 @@ def test_context_planner_refuses_modified_reference_asset(tmp_path: Path) -> Non
     asset.write_text("modified planner agent\n", encoding="utf-8")
 
     assert inspect_context_planner(repo).state == "drifted"
-    with pytest.raises(CodeGraphOnboardingError, match="modified context-planner asset"):
+    with pytest.raises(
+        CodeGraphOnboardingError, match="modified context-planner asset"
+    ):
         remove_context_planner(repo, installation)
 
 
@@ -433,7 +438,14 @@ def test_schema_two_receipt_is_read_and_rewritten_as_schema_four(
         loaded.with_context_planner(refreshed.installation)
     )
     assert json.loads(upgraded.read_text(encoding="utf-8"))["schema_version"] == 4
-    assert len(loaded.with_context_planner(refreshed.installation).context_planner.managed_files) == 6
+    assert (
+        len(
+            loaded.with_context_planner(
+                refreshed.installation
+            ).context_planner.managed_files
+        )
+        == 6
+    )
 
 
 def test_cli_context_planner_uninstall_updates_receipt(
@@ -822,6 +834,192 @@ def test_init_is_idempotent_and_writes_no_repository_files(
     assert "CodeGraph is ready" in capsys.readouterr().out
 
 
+def _init_with_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, tuple[str, ...]],
+    extra_args: tuple[str, ...] = (),
+):
+    import codenib.codegraph_onboarding as onboarding
+
+    repo = _repository(tmp_path)
+    _initialize_git_repository(repo)
+    monkeypatch.setenv("CODENIB_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("CODENIB_HOOK_MODE", raising=False)
+    configured: dict[str, MCPServerSpec] = {}
+
+    monkeypatch.setattr(
+        onboarding,
+        "resolve_requested_clients",
+        lambda _requested: ("codex",),
+    )
+    monkeypatch.setattr(
+        onboarding,
+        "resolve_codenib_command",
+        lambda _explicit=None: command,
+    )
+    monkeypatch.setattr(
+        onboarding,
+        "inspect_server_command",
+        lambda *_args, **_kwargs: SimpleNamespace(ready=True, detail="ready"),
+    )
+
+    def inspect(client, server, _repo):
+        current = configured.get(client)
+        return ClientInspection(
+            client,
+            True,
+            current is not None,
+            current == server,
+            "configuration matches" if current == server else "not configured",
+        )
+
+    monkeypatch.setattr(onboarding, "inspect_client_registration", inspect)
+    monkeypatch.setattr(
+        onboarding,
+        "add_client_registration",
+        lambda client, server, _repo: configured.update({client: server}),
+    )
+    monkeypatch.setattr(
+        cli, "_codegraph_toolchain_plan", lambda *_args: _ready_plan(repo)
+    )
+    monkeypatch.setattr(cli, "_require_modules", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_check_view_dependencies", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "index_repository",
+        lambda *_args, **_kwargs: (_manifest(repo), []),
+    )
+    monkeypatch.setattr(cli, "_print_index_summary", lambda *_args: None)
+    args = cli.build_parser().parse_args(
+        ["codegraph", "init", str(repo), "--agent", "codex", *extra_args]
+    )
+    return repo, args
+
+
+def test_init_installs_hooks_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+
+    from codenib.codegraph_hooks import (
+        HOOK_MARKER,
+        HOOK_NAMES,
+        hook_file_path,
+        load_hook_receipt,
+    )
+
+    repo, args = _init_with_hooks(
+        tmp_path, monkeypatch, (sys.executable, ("-m", "codenib"))
+    )
+
+    assert cli._run_codegraph_init(args) == 0
+    for name in HOOK_NAMES:
+        assert HOOK_MARKER in hook_file_path(repo, name).read_text(encoding="utf-8")
+    receipt = load_hook_receipt(repo)
+    assert receipt is not None
+    assert receipt.command == (sys.executable, "-m", "codenib")
+    assert "installed (background" in capsys.readouterr().out
+
+
+def test_init_no_hooks_skips_hook_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+
+    from codenib.codegraph_hooks import HOOK_NAMES, hook_file_path, load_hook_receipt
+
+    repo, args = _init_with_hooks(
+        tmp_path, monkeypatch, (sys.executable, ("-m", "codenib")), ("--no-hooks",)
+    )
+
+    assert cli._run_codegraph_init(args) == 0
+    assert load_hook_receipt(repo) is None
+    assert all(not hook_file_path(repo, name).exists() for name in HOOK_NAMES)
+    assert "skipped (--no-hooks)" in capsys.readouterr().out
+
+
+def test_init_skips_hooks_on_ci(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+
+    from codenib.codegraph_hooks import load_hook_receipt
+
+    repo, args = _init_with_hooks(
+        tmp_path, monkeypatch, (sys.executable, ("-m", "codenib"))
+    )
+    monkeypatch.setenv("CI", "true")
+
+    assert cli._run_codegraph_init(args) == 0
+    assert load_hook_receipt(repo) is None
+    assert "skipped (CI environment)" in capsys.readouterr().out
+
+
+def test_init_warns_but_succeeds_when_hooks_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+
+    from codenib.codegraph_hooks import hook_file_path, load_hook_receipt
+
+    repo, args = _init_with_hooks(
+        tmp_path, monkeypatch, (sys.executable, ("-m", "codenib"))
+    )
+    foreign = hook_file_path(repo, "post-commit")
+    foreign.write_text("#!/bin/sh\necho foreign\n", encoding="utf-8")
+
+    assert cli._run_codegraph_init(args) == 0
+    assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho foreign\n"
+    assert load_hook_receipt(repo) is None
+    assert "CodeGraph hooks not installed" in capsys.readouterr().out
+
+
+def test_init_reuses_current_hooks_on_reinit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+
+    from codenib.codegraph_hooks import load_hook_receipt
+
+    repo, args = _init_with_hooks(
+        tmp_path, monkeypatch, (sys.executable, ("-m", "codenib"))
+    )
+
+    assert cli._run_codegraph_init(args) == 0
+    capsys.readouterr()
+    assert cli._run_codegraph_init(args) == 0
+    assert load_hook_receipt(repo) is not None
+    assert "current (automatic updates enabled)" in capsys.readouterr().out
+
+
+def test_init_derives_hook_argv_from_effective_server() -> None:
+    import sys
+
+    from codenib.codegraph_onboarding import make_server_spec
+
+    server = make_server_spec(
+        "/repo", command=sys.executable, command_prefix=("-m", "codenib")
+    )
+
+    assert cli._codegraph_hook_argv(server, Path("/repo")) == (
+        sys.executable,
+        "-m",
+        "codenib",
+    )
+
+
 def test_init_opt_in_installs_context_planner_and_records_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1058,7 +1256,8 @@ def test_dry_run_reports_project_prerequisites_and_exits_nonzero(
     assert "prerequisite: Go project prerequisite go.mod" in output
     assert "context-planner: Skill create; CLAUDE.md create" in output
     assert "Readiness:  blocked" in output
-    assert "no tools, indexes, receipts, or clients changed" in output
+    assert "hooks: install post-commit, post-checkout" in output
+    assert "no tools, indexes, receipts, clients, or hooks changed" in output
     assert not (repo / ".claude").exists()
 
 

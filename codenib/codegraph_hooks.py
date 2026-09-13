@@ -31,7 +31,7 @@ from .paths import repo_state_dir
 
 HOOK_NAMES = ("post-commit", "post-checkout", "post-merge", "post-rewrite")
 HOOK_MARKER = "# managed by codenib hook"
-HOOK_RECEIPT_SCHEMA = 1
+HOOK_RECEIPT_SCHEMA = 2
 HOOK_RECEIPT_DIRNAME = "codegraph"
 HOOK_RECEIPT_FILENAME = "hooks.json"
 HOOK_MODE_ENV = "CODENIB_HOOK_MODE"
@@ -56,6 +56,7 @@ class HookReceipt:
     mode: str
     batch_size: int | None
     hooks: tuple[str, ...]
+    command: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -63,6 +64,7 @@ class HookReceipt:
             "repository": str(self.repository),
             "mode": self.mode,
             "batch_size": self.batch_size,
+            "command": list(self.command) if self.command is not None else None,
             "hooks": {name: {"state": _HOOK_INSTALLED_STATE} for name in self.hooks},
         }
 
@@ -321,7 +323,7 @@ def install_hooks(
                     f"refusing to overwrite foreign git hook {path}; "
                     "pass force=True to replace it"
                 )
-    receipt = HookReceipt(repository, mode, batch_size, HOOK_NAMES)
+    receipt = HookReceipt(repository, mode, batch_size, HOOK_NAMES, command)
     if dry_run:
         return receipt
     for name in HOOK_NAMES:
@@ -340,6 +342,8 @@ def _hook_current(content: str, receipt: HookReceipt | None, name: str) -> bool:
     if receipt is None or name not in receipt.hooks:
         return False
     if "--from-head" not in content:
+        return False
+    if receipt.command is not None and shlex.join(receipt.command) not in content:
         return False
     if receipt.batch_size is None:
         return "--embedding-batch-size" not in content
@@ -429,6 +433,18 @@ def _strict_keys(
     return value
 
 
+def _strict_command(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not list
+        or not value
+        or any(type(item) is not str or not item for item in value)
+    ):
+        raise CodeGraphHookError("invalid CodeGraph hook receipt field: command")
+    return tuple(value)
+
+
 def load_hook_receipt(repo: Path) -> HookReceipt | None:
     """Load and strictly validate the per-checkout hook receipt, if present."""
 
@@ -443,16 +459,18 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
             f"cannot read CodeGraph hook receipt {path}: {exc}"
         ) from exc
 
-    root = _strict_keys(
-        payload,
-        {"schema_version", "repository", "mode", "batch_size", "hooks"},
-        field="root",
-    )
-    if (
-        type(root["schema_version"]) is not int
-        or root["schema_version"] != HOOK_RECEIPT_SCHEMA
+    if type(payload) is not dict:
+        raise CodeGraphHookError("invalid CodeGraph hook receipt object: root")
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version not in (
+        1,
+        HOOK_RECEIPT_SCHEMA,
     ):
         raise CodeGraphHookError("unsupported CodeGraph hook receipt schema")
+    expected_keys = {"schema_version", "repository", "mode", "batch_size", "hooks"}
+    if schema_version == HOOK_RECEIPT_SCHEMA:
+        expected_keys = expected_keys | {"command"}
+    root = _strict_keys(payload, expected_keys, field="root")
     recorded_repo = Path(_strict_string(root["repository"], field="repository"))
     if not recorded_repo.is_absolute() or recorded_repo != repository:
         raise CodeGraphHookError(
@@ -464,6 +482,9 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
     batch_size = root["batch_size"]
     if batch_size is not None and (type(batch_size) is not int or batch_size <= 0):
         raise CodeGraphHookError("invalid CodeGraph hook receipt field: batch_size")
+    command: tuple[str, ...] | None = None
+    if root["schema_version"] == HOOK_RECEIPT_SCHEMA:
+        command = _strict_command(root["command"])
     hooks_value = root["hooks"]
     if type(hooks_value) is not dict or set(hooks_value) != set(HOOK_NAMES):
         raise CodeGraphHookError("invalid CodeGraph hook receipt object: hooks")
@@ -479,6 +500,7 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
         mode,
         batch_size,
         tuple(name for name in HOOK_NAMES if name in hooks_value),
+        command,
     )
 
 

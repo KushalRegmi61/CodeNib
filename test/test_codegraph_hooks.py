@@ -453,6 +453,7 @@ def test_load_hook_receipt_rejects_subset_hooks(tmp_path, monkeypatch) -> None:
                 "repository": str(repo.resolve()),
                 "mode": "background",
                 "batch_size": None,
+                "command": None,
                 "hooks": {"post-commit": {"state": "installed"}},
             }
         ),
@@ -478,6 +479,7 @@ def test_load_hook_receipt_rejects_extra_hooks(tmp_path, monkeypatch) -> None:
                 "repository": str(repo.resolve()),
                 "mode": "background",
                 "batch_size": None,
+                "command": None,
                 "hooks": hooks,
             }
         ),
@@ -549,3 +551,73 @@ def test_resolve_hook_argv_rejects_non_executable_absolute(
             codenib_argv=(str(candidate),),
             dry_run=True,
         )
+
+
+def test_install_receipt_records_resolved_command(tmp_path, monkeypatch) -> None:
+    repo = _isolated_repo(tmp_path, monkeypatch)
+
+    receipt = install_hooks(
+        repo,
+        mode="background",
+        batch_size=None,
+        codenib_argv=(sys.executable, "-m", "codenib"),
+    )
+
+    assert receipt.command == (sys.executable, "-m", "codenib")
+    assert receipt.to_dict()["command"] == [sys.executable, "-m", "codenib"]
+    assert receipt.to_dict()["schema_version"] == HOOK_RECEIPT_SCHEMA
+    loaded = load_hook_receipt(repo)
+    assert loaded is not None
+    assert loaded.command == (sys.executable, "-m", "codenib")
+    assert loaded.to_dict() == receipt.to_dict()
+
+
+def test_legacy_v1_receipt_loads_with_unknown_command(tmp_path, monkeypatch) -> None:
+    from codenib.paths import repo_state_dir
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    receipt_path = repo_state_dir(repo) / "codegraph" / "hooks.json"
+    receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "repository": str(repo.resolve()),
+                "mode": "background",
+                "batch_size": None,
+                "hooks": {name: {"state": "installed"} for name in HOOK_NAMES},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_hook_receipt(repo)
+
+    assert loaded is not None
+    assert loaded.command is None
+
+
+def test_hook_currency_detects_command_drift(tmp_path, monkeypatch) -> None:
+    import dataclasses
+
+    from codenib.codegraph_hooks import _hook_current
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    receipt = install_hooks(
+        repo,
+        mode="background",
+        batch_size=None,
+        codenib_argv=(sys.executable, "-m", "codenib"),
+    )
+    content = hook_file_path(repo, "post-commit").read_text(encoding="utf-8")
+
+    assert _hook_current(content, receipt, "post-commit") is True
+
+    drifted = dataclasses.replace(receipt, command=("/bin/false",))
+    assert _hook_current(content, drifted, "post-commit") is False
+    assert all(
+        item.current is False for item in inspect_hooks(repo, drifted) if item.installed
+    )
+
+    legacy = dataclasses.replace(receipt, command=None)
+    assert _hook_current(content, legacy, "post-commit") is True

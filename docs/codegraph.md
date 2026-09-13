@@ -62,6 +62,17 @@ reconciles unchanged CodeNib-owned Skill, agent, reference, and guidance
 content and refuses to overwrite manually modified files or an unmanaged
 context-planner section.
 
+Initialization also installs managed git hooks (`post-commit`,
+`post-checkout`, `post-merge`, `post-rewrite`) so the graph rebuilds from the
+committed tree after every commit, merge, checkout, and rewrite without a
+restart. The hooks pin the same CodeNib runtime the MCP registration uses, and
+the installation is recorded so `hook status` can detect executable drift.
+Re-running init reuses current hooks. Pass `--no-hooks` to skip hook
+installation; hooks are skipped automatically in CI (`CI=true`). Hook problems
+(foreign hooks, missing runtime) warn without failing init — run
+`codenib codegraph hook install` later to enable automatic updates. `.git/hooks`
+is never committed, so reinstall per clone.
+
 The installed Skill and agents resolve MCP tool names from the live registration
 and do not hardcode a client-specific prefix. They start with `get_manifest`
 and bounded `explore_context`, preserve project/file scope, route only the
@@ -206,8 +217,9 @@ codenib codegraph init . --rebuild
 ## Automatic updates
 
 Keep indexes fresh across commits, pulls, and branch switches without a
-daemon. Install detached git hooks into the target checkout (`.git/hooks/`
-is never committed, so reinstall per clone):
+daemon. `codegraph init` installs these hooks by default (unless `--no-hooks`
+or `CI=true`); reinstall or repair them standalone into the target checkout
+(`.git/hooks/` is never committed, so reinstall per clone):
 
 ```bash
 codenib codegraph hook install /path/to/repository \
@@ -238,7 +250,9 @@ without reinstalling:
 | `CODENIB_EMBEDDING_BATCH_SIZE` | fallback encode batch size (small GPUs: `2`) | model default |
 
 Hooks track `--preset auto` semantics, and `hook status` checks installation
-currency against the receipt, not command drift.
+currency against the receipt — including the recorded CodeNib executable, so
+a runtime that drifted since installation reports non-current instead of
+failing silently on every commit.
 Hooks refuse to overwrite hook files they did not write (use `--force`),
 and `codenib codegraph hook uninstall` removes only CodeNib-managed hooks.
 Pass `hook install --command` to override the recorded CodeNib executable
