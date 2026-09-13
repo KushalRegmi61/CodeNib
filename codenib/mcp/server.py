@@ -310,6 +310,7 @@ def get_context() -> ServerContext:
     """Return the loaded ServerContext or raise if uninitialized."""
     if _ctx is None:
         raise RuntimeError("ServerContext not initialized. Call init_server() first.")
+    _ctx.reload_if_stale()
     return _ctx
 
 
@@ -475,6 +476,7 @@ async def search_context(
     """Execute capability-aware ranked retrieval over loaded repository views."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         search_context_impl,
         _ctx,
@@ -514,6 +516,7 @@ async def semantic_search(
     """
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await _search_semantic_impl(
         ctx=_ctx,
         query=query,
@@ -545,6 +548,7 @@ async def search_bm25(
     """BM25 keyword search over indexed code symbols."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         search_bm25_impl, _ctx, query, top_k, filter_test, project_id or None
     )
@@ -573,6 +577,7 @@ async def search_regex(
     """Regex pattern search over code graph nodes."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         search_regex_impl,
         _ctx,
@@ -605,6 +610,7 @@ async def search_zoekt(
     """Trigram-based search over raw repository contents."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         search_zoekt_impl,
         _ctx,
@@ -639,6 +645,7 @@ async def dependency_subgraph(
     """Call-graph subgraph for *symbol*, bounded by node and edge budgets."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         dependency_subgraph_impl,
         _ctx,
@@ -685,6 +692,7 @@ async def find_projects_using_tool(
 ) -> dict[str, Any]:
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         find_projects_using_impl,
         _ctx,
@@ -717,6 +725,7 @@ async def lsp_definition(
     """Provider-backed definition lookup with persisted-graph fallback."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         lsp_definition_impl,
         _ctx,
@@ -752,6 +761,7 @@ async def lsp_references(
     """Provider-backed reference lookup with persisted-graph fallback."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         lsp_references_impl,
         _ctx,
@@ -787,6 +797,7 @@ async def lsp_route(
     """Provider-backed route map with persisted-graph fallback."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         lsp_route_impl,
         _ctx,
@@ -818,6 +829,7 @@ async def read_source(
     """Return one bounded window from content-authenticated source bytes."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     return await asyncio.to_thread(
         read_source_impl,
         _ctx,
@@ -843,6 +855,7 @@ async def get_manifest() -> dict[str, Any]:
     """Return the repo manifest as a dict."""
     if _ctx is None:
         raise RuntimeError("Server not initialized")
+    _ctx.reload_if_stale()
     source_verified = _ctx.verify_source_status()
     result = _ctx.manifest.to_dict()
     workspace = dict(_ctx.workspace_status)
@@ -1207,6 +1220,10 @@ def init_server(
                 source_binding=retained_source,
             )
             new_context.source_error = source_error
+            if resolved_manifest_path is not None and (
+                artifact is None and artifact_binding is None
+            ):
+                new_context._note_manifest_path(resolved_manifest_path)
             portable_artifact = artifact is not None or artifact_binding is not None
             new_context.configure_lsp_provider(
                 allow_native=new_context.source_verified and not portable_artifact,

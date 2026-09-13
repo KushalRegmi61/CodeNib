@@ -44,6 +44,7 @@ def scratch_repo(tmp_path: Path, monkeypatch) -> Path:
 
 def test_hook_lifecycle_refreshes_index_on_commit(scratch_repo: Path) -> None:
     import json
+    import sys
     import time
 
     from codenib.cli import index_repository
@@ -54,7 +55,7 @@ def test_hook_lifecycle_refreshes_index_on_commit(scratch_repo: Path) -> None:
         scratch_repo,
         mode="sync",
         batch_size=None,
-        codenib_argv=("codenib",),
+        codenib_argv=(sys.executable, "-m", "codenib"),
     )
     for name in HOOK_NAMES:
         content = hook_file_path(scratch_repo, name).read_text()

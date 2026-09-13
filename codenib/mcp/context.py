@@ -334,6 +334,16 @@ class ServerContext:
         init=False,
         repr=False,
     )
+    _manifest_path: Optional[Path] = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _manifest_stat: Optional[tuple[int, int]] = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def _install_zoekt_snapshot(self, snapshot: ZoektShardSnapshot) -> None:
         """Publish snapshot ownership before a cancellation can escape."""
@@ -402,6 +412,157 @@ class ServerContext:
             return False
         self.source_error = None
         return True
+
+    def _note_manifest_path(self, path: str | Path) -> None:
+        """Record the on-disk manifest plus a stat short-circuit token."""
+
+        self._manifest_path = Path(path)
+        try:
+            stat = self._manifest_path.stat()
+        except OSError:
+            self._manifest_stat = None
+        else:
+            self._manifest_stat = (stat.st_mtime_ns, stat.st_size)
+
+    @staticmethod
+    def _manifest_identity(manifest: RepoManifest) -> tuple[Any, Any, Any]:
+        """Identity that changes on every hook-triggered reindex."""
+
+        return (
+            manifest.commit,
+            manifest.source_fingerprint,
+            manifest.source_selection_digest,
+        )
+
+    def reload_if_stale(self) -> Dict[str, Any]:
+        """Hot-swap manifest-bound views when the on-disk manifest moved on.
+
+        Single reload path for long-lived MCP processes: hook-triggered
+        ``codenib index --preset auto`` runs rewrite the manifest atomically,
+        and the next tool call picks it up without a restart.
+
+        Locking invariant: the ``_view_lock`` (``RLock``) serializes reload
+        against ``load_views`` and ``close``. The linearization point is the
+        manifest swap plus each per-view pointer swap, all under the lock.
+        Each view follows validate-complete-then-swap — the fresh object is
+        fully loaded before the old one is retired, and a failed generation
+        restores the previous object so queries keep serving (possibly stale)
+        instead of dropping to ``None``. On an escaping ``BaseException``
+        (e.g. cancellation) the previous manifest is restored so the next
+        call retries; old resources are only retired after their replacement
+        validates.
+        """
+
+        with self._view_lock:
+            if self._manifest_path is None:
+                return {"reloaded": False, "reason": "no-manifest-path"}
+            if self.artifact is not None or self._artifact_binding is not None:
+                return {"reloaded": False, "reason": "portable-artifact"}
+            try:
+                stat = self._manifest_path.stat()
+            except OSError as exc:
+                return {"reloaded": False, "reason": f"manifest-unreadable: {exc}"}
+            token = (stat.st_mtime_ns, stat.st_size)
+            if self._manifest_stat == token:
+                return {"reloaded": False, "reason": "current"}
+            try:
+                fresh = RepoManifest.load(self._manifest_path)
+            except Exception as exc:
+                return {"reloaded": False, "reason": f"manifest-unreadable: {exc}"}
+            self._manifest_stat = token
+            if self._manifest_identity(fresh) == self._manifest_identity(self.manifest):
+                return {"reloaded": False, "reason": "current"}
+            previous = self.manifest
+            self.manifest = fresh
+            candidates = [
+                view
+                for view, _ in _VIEW_LOADERS
+                if getattr(self, view, None) is not None or view in self.errors
+            ]
+            if "symbol_graph" in candidates and "regex_index" not in candidates:
+                candidates.append("regex_index")
+            swapped: list[str] = []
+            failed: Dict[str, str] = {}
+            try:
+                for view in [v for v, _ in _VIEW_LOADERS if v in candidates]:
+                    if self._swap_view(view):
+                        swapped.append(view)
+                    else:
+                        failed[view] = self.errors.get(view, "view did not load")
+            except BaseException:
+                self.manifest = previous
+                raise
+            self.configure_lsp_provider(
+                allow_native=self._lsp_allow_native,
+                native_disabled_reason=self._lsp_native_disabled_reason,
+            )
+            self.verify_source_status()
+            result: Dict[str, Any] = {
+                "reloaded": True,
+                "previous_commit": previous.commit,
+                "commit": fresh.commit,
+                "swapped_views": sorted(swapped),
+                "loaded_views": sorted(self.loaded_views),
+            }
+            if failed:
+                result["view_errors"] = dict(sorted(failed.items()))
+            return result
+
+    def _swap_view(self, view: str) -> bool:
+        """Reload one view validate-complete-then-swap; never raises Exception.
+
+        Returns ``True`` when the fresh object is live. On any ``Exception``
+        the previous object is restored. A ``BaseException`` also restores
+        before propagating so the context stays queryable.
+        """
+
+        loaders = {
+            "symbol_graph": self._load_symbol_graph,
+            "bm25": self._load_bm25,
+            "regex_index": self._load_regex_index,
+            "zoekt": self._load_zoekt,
+            "vector": self._load_vector,
+        }
+        load = loaders[view]
+        old = getattr(self, view, None)
+        old_snapshot = None
+        if view == "zoekt":
+            old_snapshot = self._zoekt_snapshot
+            self._zoekt_snapshot = None
+        setattr(self, view, None)
+        self.errors.pop(view, None)
+        try:
+            load()
+        except Exception as exc:
+            self.errors[view] = str(exc)
+        except BaseException:
+            setattr(self, view, old)
+            if view == "zoekt":
+                self._zoekt_snapshot = old_snapshot
+            raise
+        new = getattr(self, view, None)
+        if new is None or new is old:
+            setattr(self, view, old)
+            if view == "zoekt":
+                self._zoekt_snapshot = old_snapshot
+            self.errors.setdefault(view, "view did not load")
+            return False
+        if old is not None:
+            self._retire_view(view, old, old_snapshot)
+        return True
+
+    def _retire_view(self, view: str, old: Any, old_snapshot: Any) -> None:
+        """Best-effort release of a replaced view; reload success stands."""
+
+        try:
+            if view == "zoekt":
+                _stop_zoekt(old)
+            elif view == "vector":
+                _close_vector(old)
+            if view == "zoekt" and old_snapshot is not None:
+                old_snapshot.close()
+        except Exception as exc:
+            logger.warning("Failed to retire replaced %s view: %s", view, exc)
 
     @classmethod
     def load(
@@ -473,6 +634,8 @@ class ServerContext:
                 _artifact_binding=artifact_binding,
                 _source_binding=None,
             )
+            if isinstance(manifest_path, (str, Path)):
+                ctx._note_manifest_path(manifest_path)
             if _context_owner is not None:
                 if not callable(_context_owner):
                     raise TypeError("context owner must be callable")

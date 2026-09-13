@@ -530,6 +530,7 @@ def _prepare_index_compiler(
     embedding_batch_size: int | None = None,
     allow_graph_project_preparation: bool = True,
     allow_partial_graph_languages: bool = True,
+    cache_dir: Path | None = None,
 ) -> tuple[object, Path]:
     """Construct the shared compiler configuration and canonical cache path."""
     from .toolchains import activate_managed_toolchain
@@ -569,8 +570,10 @@ def _prepare_index_compiler(
             source_selection=source_selection,
         ),
     )
-    cache_dir = repo_index_dir(repo_path)
-    return compiler, cache_dir
+    resolved_cache = (
+        Path(cache_dir) if cache_dir is not None else repo_index_dir(repo_path)
+    )
+    return compiler, resolved_cache
 
 
 def index_repository(
@@ -588,11 +591,48 @@ def index_repository(
     embedding_batch_size: int | None = None,
     allow_graph_project_preparation: bool = True,
     allow_partial_graph_languages: bool = True,
+    from_head: bool = False,
+    cache_dir: Path | None = None,
 ):
-    """Build or update the requested repository views."""
-    from .compiler.manifest import MANIFEST_FILENAME
+    """Build or update the requested repository views.
 
-    compiler, cache_dir = _prepare_index_compiler(
+    With ``from_head``, the committed HEAD tree is indexed from a disposable
+    detached worktree while artifacts and the manifest stay bound to the real
+    checkout's cache directory, so dirty worktrees and untracked files can
+    neither block nor pollute the build.
+    """
+    from .compiler.manifest import MANIFEST_FILENAME
+    from .paths import repo_index_dir
+
+    if from_head:
+        from .compiler.head_snapshot import materialize_head_snapshot
+
+        canonical_cache = (
+            Path(cache_dir) if cache_dir is not None else repo_index_dir(repo_path)
+        )
+        with materialize_head_snapshot(repo_path) as snapshot:
+            manifest, failed = index_repository(
+                snapshot,
+                languages=languages,
+                views=views,
+                source_selection=source_selection,
+                rebuild=rebuild,
+                embedding_provider=embedding_provider,
+                embedding_model=embedding_model,
+                embedding_dimension=embedding_dimension,
+                embedding_endpoint=embedding_endpoint,
+                embedding_credential_env=embedding_credential_env,
+                embedding_batch_size=embedding_batch_size,
+                allow_graph_project_preparation=allow_graph_project_preparation,
+                allow_partial_graph_languages=allow_partial_graph_languages,
+                cache_dir=canonical_cache,
+            )
+        if os.path.realpath(manifest.repo_path) != os.path.realpath(repo_path):
+            manifest.repo_path = os.path.abspath(repo_path)
+            manifest.save(canonical_cache / MANIFEST_FILENAME)
+        return manifest, failed
+
+    compiler, resolved_cache = _prepare_index_compiler(
         repo_path,
         languages=languages,
         views=views,
@@ -605,19 +645,20 @@ def index_repository(
         embedding_batch_size=embedding_batch_size,
         allow_graph_project_preparation=allow_graph_project_preparation,
         allow_partial_graph_languages=allow_partial_graph_languages,
+        cache_dir=cache_dir,
     )
-    manifest_path = cache_dir / MANIFEST_FILENAME
+    manifest_path = resolved_cache / MANIFEST_FILENAME
     if manifest_path.is_file() and not rebuild:
         manifest = compiler.update_repo(
             str(repo_path),
             index_types=list(views),
-            cache_dir=str(cache_dir),
+            cache_dir=str(resolved_cache),
         )
     else:
         manifest = compiler.compile_repo(
             str(repo_path),
             index_types=list(views),
-            cache_dir=str(cache_dir),
+            cache_dir=str(resolved_cache),
         )
 
     failed = [view for view in views if not manifest.index_is_current(view)]
@@ -693,6 +734,7 @@ def _run_index(
         "views": views,
         "source_selection": resolved_selection.selection,
         "rebuild": args.rebuild,
+        "from_head": bool(getattr(args, "from_head", False)),
         "embedding_batch_size": batch_size,
     }
     if embedding_route is not None:
@@ -2441,9 +2483,7 @@ def _run_codegraph_init(args: argparse.Namespace) -> int:
             repo_path,
             checkout_snapshot,
             stage="context-planner installation",
-            allowed_paths=[
-                path.as_posix() for path in CONTEXT_PLANNER_MANAGED_PATHS
-            ]
+            allowed_paths=[path.as_posix() for path in CONTEXT_PLANNER_MANAGED_PATHS]
             + [CONTEXT_PLANNER_LEGACY_CLAUDE_PATH.as_posix()],
         )
 
@@ -2703,9 +2743,7 @@ def _codegraph_status_report(repo_path: Path) -> dict[str, object]:
             "state": planner.state,
             "skill_state": planner.skill_state,
             "claude_state": planner.claude_state,
-            "asset_states": {
-                path: state for path, state in planner.asset_states
-            },
+            "asset_states": {path: state for path, state in planner.asset_states},
             "detail": planner.detail,
             "managed": receipt is not None and receipt.context_planner is not None,
         },
@@ -3130,6 +3168,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--rebuild",
         action="store_true",
         help="force a clean rebuild even when an existing view is current",
+    )
+    index_parser.add_argument(
+        "--from-head",
+        action="store_true",
+        help="index the committed HEAD tree from a detached worktree "
+        "instead of the working tree (dirty files and untracked paths "
+        "are ignored)",
     )
     _add_source_selection_arguments(index_parser)
     _add_embedding_route_arguments(index_parser)

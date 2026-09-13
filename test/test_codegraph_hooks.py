@@ -160,7 +160,7 @@ def test_install_hooks_writes_hooks_and_receipt(tmp_path, monkeypatch) -> None:
         repo,
         mode="background",
         batch_size=None,
-        codenib_argv=(sys.executable,),
+        codenib_argv=(sys.executable, "-m", "codenib"),
     )
 
     assert receipt.mode == "background"
@@ -179,7 +179,10 @@ def test_install_hooks_rejects_missing_git_dir(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(CodeGraphHookError):
         install_hooks(
-            repo, mode="background", batch_size=None, codenib_argv=(sys.executable,)
+            repo,
+            mode="background",
+            batch_size=None,
+            codenib_argv=(sys.executable, "-m", "codenib"),
         )
 
 
@@ -193,7 +196,10 @@ def test_install_hooks_refuses_foreign_hook_without_force(
 
     with pytest.raises(CodeGraphHookError):
         install_hooks(
-            repo, mode="background", batch_size=None, codenib_argv=(sys.executable,)
+            repo,
+            mode="background",
+            batch_size=None,
+            codenib_argv=(sys.executable, "-m", "codenib"),
         )
 
     receipt = install_hooks(
@@ -216,7 +222,7 @@ def test_install_hooks_dry_run_writes_nothing(tmp_path, monkeypatch) -> None:
         repo,
         mode="background",
         batch_size=None,
-        codenib_argv=(sys.executable,),
+        codenib_argv=(sys.executable, "-m", "codenib"),
         dry_run=True,
     )
 
@@ -271,7 +277,10 @@ def test_inspect_and_remove_hooks(tmp_path, monkeypatch) -> None:
     )
 
     receipt = install_hooks(
-        repo, mode="background", batch_size=None, codenib_argv=(sys.executable,)
+        repo,
+        mode="background",
+        batch_size=None,
+        codenib_argv=(sys.executable, "-m", "codenib"),
     )
     inspections = inspect_hooks(repo, load_hook_receipt(repo))
     assert [item.name for item in inspections] == list(HOOK_NAMES)
@@ -321,6 +330,33 @@ def test_render_hook_script_uses_portable_single_flight_lock() -> None:
     assert "flock" not in script
 
 
+def test_hook_names_cover_rewrite_for_rebase() -> None:
+    assert "post-rewrite" in HOOK_NAMES
+
+
+def test_render_hook_script_wraps_skips_in_subshell() -> None:
+    script = render_hook_script(("codenib",), Path("/repo"), batch_size=None)
+
+    assert "(\n" in script or "(" in script.splitlines()[4]
+    # Subshell-local skips must not terminate chained hooks.
+    assert script.count("exit 0") >= 2
+
+
+def test_render_hook_script_uses_detached_python_launcher() -> None:
+    script = render_hook_script(("codenib",), Path("/repo"), batch_size=None)
+
+    assert "start_new_session" in script
+    assert "nohup" not in script
+
+
+def test_render_hook_script_skips_rebase_merge_and_worktree() -> None:
+    script = render_hook_script(("codenib",), Path("/repo"), batch_size=None)
+
+    assert "rebase-merge" in script
+    assert "MERGE_HEAD" in script
+    assert "git-common-dir" in script or "git_common" in script or "COMMONDIR" in script
+
+
 def test_hook_runtime_supports_batch_size_for_current_runtime() -> None:
     assert hook_runtime_supports_batch_size((sys.executable, "-m", "codenib")) is True
 
@@ -348,7 +384,7 @@ def test_install_hooks_rejects_batch_size_for_stale_runtime(
         )
 
 
-def test_install_hooks_without_batch_size_skips_runtime_probe(
+def test_install_hooks_without_batch_size_uses_current_runtime(
     tmp_path, monkeypatch
 ) -> None:
     repo = _isolated_repo(tmp_path, monkeypatch)
@@ -357,11 +393,31 @@ def test_install_hooks_without_batch_size_skips_runtime_probe(
         repo,
         mode="background",
         batch_size=None,
-        codenib_argv=("/bin/true",),
+        codenib_argv=(sys.executable, "-m", "codenib"),
         dry_run=True,
     )
 
     assert receipt.batch_size is None
+
+
+def test_install_hooks_rejects_runtime_without_from_head(tmp_path, monkeypatch) -> None:
+    repo = _isolated_repo(tmp_path, monkeypatch)
+
+    with pytest.raises(CodeGraphHookError, match="--from-head"):
+        install_hooks(
+            repo,
+            mode="background",
+            batch_size=None,
+            codenib_argv=("/bin/true",),
+            dry_run=True,
+        )
+
+
+def test_hook_runtime_supports_from_head_for_current_runtime() -> None:
+    from codenib.codegraph_hooks import hook_runtime_supports_from_head
+
+    assert hook_runtime_supports_from_head((sys.executable, "-m", "codenib")) is True
+    assert hook_runtime_supports_from_head(("/bin/true",)) is False
 
 
 def test_hook_current_batch_size_is_boundary_aware(tmp_path, monkeypatch) -> None:
@@ -371,7 +427,9 @@ def test_hook_current_batch_size_is_boundary_aware(tmp_path, monkeypatch) -> Non
     receipt = HookReceipt(repo.resolve(), "background", 2, HOOK_NAMES)
 
     current = render_hook_script(
-        ("codenib", "index", str(repo), "--preset", "auto"), repo, batch_size=2
+        ("codenib", "index", str(repo), "--preset", "auto", "--from-head"),
+        repo,
+        batch_size=2,
     )
     assert _hook_current(current, receipt, "post-commit") is True
 
@@ -412,7 +470,7 @@ def test_load_hook_receipt_rejects_extra_hooks(tmp_path, monkeypatch) -> None:
     receipt_path = repo_state_dir(repo) / "codegraph" / "hooks.json"
     receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     hooks = {name: {"state": "installed"} for name in HOOK_NAMES}
-    hooks["post-rewrite"] = {"state": "installed"}
+    hooks["pre-push"] = {"state": "installed"}
     receipt_path.write_text(
         json.dumps(
             {
@@ -468,7 +526,10 @@ def test_install_hooks_refuses_dangling_symlink_without_force(
 
     with pytest.raises(CodeGraphHookError):
         install_hooks(
-            repo, mode="background", batch_size=None, codenib_argv=(sys.executable,)
+            repo,
+            mode="background",
+            batch_size=None,
+            codenib_argv=(sys.executable, "-m", "codenib"),
         )
 
 

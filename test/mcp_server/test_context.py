@@ -49,6 +49,122 @@ def test_server_context_rejects_forged_authenticated_readers() -> None:
         )
 
 
+def test_reload_if_stale_single_path() -> None:
+    manifest = RepoManifest(repo_path="/repo")
+    context = ServerContext(manifest=manifest)
+
+    assert hasattr(context, "reload_if_stale")
+    result = context.reload_if_stale()
+    assert isinstance(result, dict)
+    assert "reloaded" in result
+
+
+def test_reload_if_stale_picks_up_new_commit(tmp_path: Path) -> None:
+    manifest = _current_manifest(tmp_path, {})
+    manifest_path = tmp_path / "repo_manifest.json"
+    manifest.save(manifest_path)
+
+    context = ServerContext.load(manifest_path, views=[])
+    assert context.reload_if_stale() == {
+        "reloaded": False,
+        "reason": "current",
+    }
+
+    moved = _current_manifest(tmp_path, {})
+    moved.commit = "d" * 40
+    moved.last_indexed_commit = "d" * 40
+    moved.save(manifest_path)
+
+    result = context.reload_if_stale()
+    assert result["reloaded"] is True
+    assert result["previous_commit"] == _TEST_COMMIT
+    assert result["commit"] == "d" * 40
+    assert context.manifest.commit == "d" * 40
+    assert context.reload_if_stale()["reloaded"] is False
+
+
+def _bm25_generation(tmp_path: Path, dirname: str, token: str) -> tuple[object, Path]:
+    from codenib.code_chunking.base import CodeChunk
+    from codenib.index.sparse_idx.bm25_index import BM25CodeIndexer
+
+    index_dir = tmp_path / dirname
+    index_dir.mkdir(exist_ok=True)
+    chunk = CodeChunk(
+        content=f"def {token}_handler():\n    return 1",
+        start_line=0,
+        end_line=1,
+        chunk_type="function",
+        name=f"{token}_handler",
+        file="pkg/mod.py",
+        node_id=f"pkg/mod.py:{token}_handler()",
+    )
+    indexer = BM25CodeIndexer(chunks=[chunk])
+    indexer.save_index(str(index_dir))
+    return indexer, index_dir
+
+
+def _bm25_manifest(tmp_path: Path, index_dir: Path, commit: str) -> RepoManifest:
+    manifest = _current_manifest(
+        tmp_path,
+        {
+            "bm25": IndexEntry(
+                index_type="bm25",
+                path=str(index_dir),
+                built_at="2026-08-11T00:00:00Z",
+                built_at_epoch=0.0,
+                status="fresh",
+                config={},
+            )
+        },
+    )
+    manifest.commit = commit
+    manifest.last_indexed_commit = commit
+    for entry in manifest.indexes.values():
+        _bind_fresh_entry(manifest, entry)
+    return manifest
+
+
+def test_reload_hot_swaps_loaded_bm25_view(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, views=["bm25"])
+    assert context.bm25 is not None
+    old_bm25 = context.bm25
+    top = context.bm25.search("alphaquas_handler", top_k=5)
+    assert top and top[0].node_id.endswith("alphaquas_handler()")
+
+    _bm25_generation(tmp_path, "bm25", "betazeph")
+    _bm25_manifest(tmp_path, index_dir, "e" * 40).save(manifest_path)
+
+    result = context.reload_if_stale()
+    assert result["reloaded"] is True
+    assert context.bm25 is not None
+    assert context.bm25 is not old_bm25
+    top = context.bm25.search("betazeph_handler", top_k=5)
+    assert top and top[0].node_id.endswith("betazeph_handler()")
+
+
+def test_reload_keeps_old_view_when_new_generation_fails(tmp_path: Path) -> None:
+    _, index_dir = _bm25_generation(tmp_path, "bm25", "alphaquas")
+    manifest_path = tmp_path / "repo_manifest.json"
+    _bm25_manifest(tmp_path, index_dir, _TEST_COMMIT).save(manifest_path)
+
+    context = ServerContext.load(manifest_path, views=["bm25"])
+    assert context.bm25 is not None
+    old_bm25 = context.bm25
+
+    for child in index_dir.iterdir():
+        child.unlink()
+    _bm25_manifest(tmp_path, index_dir, "e" * 40).save(manifest_path)
+
+    result = context.reload_if_stale()
+    assert result["reloaded"] is True
+    assert context.bm25 is old_bm25
+    assert "bm25" in result.get("view_errors", {})
+
+
 def _bind_fresh_entry(manifest: RepoManifest, entry: IndexEntry) -> IndexEntry:
     entry.commit = manifest.commit
     entry.source_fingerprint = manifest.source_fingerprint

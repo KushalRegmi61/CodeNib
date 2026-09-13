@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,12 +29,16 @@ from .codegraph_onboarding import (
 )
 from .paths import repo_state_dir
 
-HOOK_NAMES = ("post-commit", "post-checkout", "post-merge")
+HOOK_NAMES = ("post-commit", "post-checkout", "post-merge", "post-rewrite")
 HOOK_MARKER = "# managed by codenib hook"
 HOOK_RECEIPT_SCHEMA = 1
 HOOK_RECEIPT_DIRNAME = "codegraph"
 HOOK_RECEIPT_FILENAME = "hooks.json"
 HOOK_MODE_ENV = "CODENIB_HOOK_MODE"
+
+# ``__PINNED_PYTHON__`` is replaced at install time with the interpreter that
+# ran ``install_hooks`` so GUI git clients with a minimal PATH still work.
+_PINNED_PYTHON_PLACEHOLDER = "__PINNED_PYTHON__"
 
 _HOOK_MODES = ("background", "sync", "off")
 _HOOK_INSTALLED_STATE = "installed"
@@ -104,6 +109,28 @@ def hook_receipt_path(repository: str | Path) -> Path:
     return repo_state_dir(repository) / HOOK_RECEIPT_DIRNAME / HOOK_RECEIPT_FILENAME
 
 
+def _pinned_python() -> str:
+    """Return the current interpreter if shell-safe, else empty (safe fallback)."""
+
+    executable = sys.executable or ""
+    if not executable or re.search(r"[^a-zA-Z0-9/_.@:\-]", executable):
+        return ""
+    return executable
+
+
+# Detached Python launcher run by the hook shell: ``nohup`` is missing from
+# Git for Windows' MSYS shell, so Python detaches itself (setsid equivalent).
+# The hook process returns immediately; the child appends to the hook log.
+_DETACHED_LAUNCH = (
+    '"$CODENIB_PYTHON" -c "import os,subprocess,sys;'
+    "_cmd=sys.argv[1:];"
+    "_log=os.environ.get('CODENIB_REBUILD_LOG');"
+    "_out=open(_log,'a',buffering=1) if _log else subprocess.DEVNULL;"
+    "subprocess.Popen(_cmd,start_new_session=True,stdout=_out,"
+    'stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,close_fds=True)" '
+)
+
+
 def render_hook_script(
     codenib_argv: tuple[str, ...], repo: Path, batch_size: int | None
 ) -> str:
@@ -121,8 +148,28 @@ def render_hook_script(
                 "#!/bin/sh",
                 HOOK_MARKER,
                 f"# {repository}",
+                "# The pinned interpreter below is replaced at install time.",
+                "(",
                 "set -u",
                 'if [ "${CODENIB_HOOK_MODE:-background}" = "off" ]; then',
+                "    exit 0",
+                "fi",
+                'if [ "${CODENIB_HOOK_MODE:-background}" = "sync" ]; then',
+                "    _CODENIB_SYNC=1",
+                "fi",
+                "# Skip during rebase/merge/cherry-pick to avoid blocking --continue.",
+                "GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}",
+                '[ -d "$GIT_DIR/rebase-merge" ] && exit 0',
+                '[ -d "$GIT_DIR/rebase-apply" ] && exit 0',
+                '[ -f "$GIT_DIR/MERGE_HEAD" ] && exit 0',
+                '[ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0',
+                "# Skip inside a linked worktree (git-dir != git-common-dir).",
+                '_CODENIB_GITDIR=$(cd "$(git rev-parse --git-dir 2>/dev/null)"'
+                " 2>/dev/null && pwd)",
+                '_CODENIB_COMMONDIR=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)"'
+                " 2>/dev/null && pwd)",
+                'if [ -n "$_CODENIB_COMMONDIR" ] && '
+                '[ "$_CODENIB_GITDIR" != "$_CODENIB_COMMONDIR" ]; then',
                 "    exit 0",
                 "fi",
                 f"lock={shlex.quote(f'{state_dir}/.hook.lock')}",
@@ -131,18 +178,33 @@ def render_hook_script(
                 "fi",
                 "trap 'rmdir \"$lock\"' EXIT INT TERM",
                 f"log={shlex.quote(f'{state_dir}/hook.log')}",
-                'if [ "${CODENIB_HOOK_MODE:-background}" = "sync" ]; then',
+                'export CODENIB_REBUILD_LOG="$log"',
+                "# Resolve a Python that can import codenib (GUI clients lack PATH).",
+                '_PINNED="__PINNED_PYTHON__"',
+                'CODENIB_PYTHON="$_PINNED"',
+                'if [ -z "$CODENIB_PYTHON" ] || ! "$CODENIB_PYTHON" -c'
+                ' "import importlib.util,sys;'
+                " sys.exit(0 if importlib.util.find_spec('codenib') else 1)\""
+                " 2>/dev/null; then",
+                "    if command -v python3 >/dev/null 2>&1; then",
+                '        CODENIB_PYTHON="python3"',
+                "    else",
+                '        CODENIB_PYTHON="python"',
+                "    fi",
+                "fi",
+                'if [ "${_CODENIB_SYNC:-}" = "1" ]; then',
                 f'    {command} >>"$log" 2>&1',
                 "else",
                 '    if [ -n "${CODENIB_HOOK_TIMEOUT:-}" ]'
                 ' && [ "$CODENIB_HOOK_TIMEOUT" -eq "$CODENIB_HOOK_TIMEOUT" ]'
                 ' 2>/dev/null && [ "$CODENIB_HOOK_TIMEOUT" -gt 0 ]; then',
-                f'        nohup timeout "$CODENIB_HOOK_TIMEOUT" {command}'
-                ' >>"$log" 2>&1 &',
+                f'        {_DETACHED_LAUNCH}timeout "$CODENIB_HOOK_TIMEOUT"'
+                f' {command} >>"$log" 2>&1',
                 "    else",
-                f'        nohup {command} >>"$log" 2>&1 &',
+                f'        {_DETACHED_LAUNCH}{command} >>"$log" 2>&1',
                 "    fi",
                 "fi",
+                ")",
                 "exit 0",
             ]
         )
@@ -191,6 +253,23 @@ def hook_runtime_supports_batch_size(
     return completed.returncode == 0 and "--embedding-batch-size" in completed.stdout
 
 
+def hook_runtime_supports_from_head(
+    command: Sequence[str], *, timeout: int = 10
+) -> bool:
+    """Whether ``<command> index --help`` advertises --from-head."""
+
+    try:
+        completed = subprocess.run(
+            [*command, "index", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return False
+    return completed.returncode == 0 and "--from-head" in completed.stdout
+
+
 def install_hooks(
     repo: Path,
     *,
@@ -220,8 +299,16 @@ def install_hooks(
             "--embedding-batch-size; pass --command pointing at a codenib "
             "that supports the flag, or reinstall without --embedding-batch-size"
         )
-    argv = (*command, "index", str(repository), "--preset", "auto")
-    script = render_hook_script(argv, repository, batch_size)
+    if not hook_runtime_supports_from_head(command):
+        raise CodeGraphHookError(
+            f"CodeGraph hook runtime {command[0]!r} does not support "
+            "--from-head; pass --command pointing at a codenib "
+            "that supports the flag (committed-tree hooks require it)"
+        )
+    argv = (*command, "index", str(repository), "--preset", "auto", "--from-head")
+    script = render_hook_script(argv, repository, batch_size).replace(
+        _PINNED_PYTHON_PLACEHOLDER, _pinned_python()
+    )
     for name in HOOK_NAMES:
         path = hook_file_path(repository, name)
         if path.exists() or path.is_symlink():
@@ -251,6 +338,8 @@ def install_hooks(
 
 def _hook_current(content: str, receipt: HookReceipt | None, name: str) -> bool:
     if receipt is None or name not in receipt.hooks:
+        return False
+    if "--from-head" not in content:
         return False
     if receipt.batch_size is None:
         return "--embedding-batch-size" not in content
@@ -432,6 +521,7 @@ __all__ = [
     "hook_file_path",
     "hook_receipt_path",
     "hook_runtime_supports_batch_size",
+    "hook_runtime_supports_from_head",
     "inspect_hooks",
     "install_hooks",
     "load_hook_receipt",

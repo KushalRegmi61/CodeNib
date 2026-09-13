@@ -1102,6 +1102,7 @@ def test_index_command_auto_preset_falls_back_without_dense_dependencies(
         source_selection,
         rebuild,
         embedding_batch_size=None,
+        from_head=False,
     ):
         captured.update(
             repo_path=repo_path,
@@ -1339,6 +1340,7 @@ def test_graph_preset_selects_bm25_and_symbol_graph(
         source_selection,
         rebuild,
         embedding_batch_size=None,
+        from_head=False,
     ):
         assert source_selection == RepositorySourceSelection()
         assert embedding_batch_size is None

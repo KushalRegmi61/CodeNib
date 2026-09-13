@@ -215,9 +215,19 @@ codenib codegraph hook install /path/to/repository \
 codenib codegraph hook status /path/to/repository
 ```
 
-`post-commit`, `post-merge`, and `post-checkout` each trigger
-`codenib index <repo> --preset auto` in the background and always exit 0,
-so a slow or failed rebuild never blocks your git operation. When nothing
+`post-commit`, `post-merge`, `post-checkout`, and `post-rewrite` each trigger
+`codenib index <repo> --preset auto` detached in the background and always
+exit 0, so a slow or failed rebuild never blocks your git operation.
+`post-rewrite` covers `rebase`/`amend` and `pull --rebase`; `post-merge`
+covers `pull --merge`. Hooks skip rebase/merge/cherry-pick interiors and
+linked worktrees, resolve a codenib-capable Python even for GUI clients with
+a minimal PATH, and run inside a subshell so chained hooks keep working.
+The MCP server picks up the rewritten manifest on the next tool call
+without a restart: a stat short-circuit keeps the check to one syscall when
+nothing changed, and a changed manifest hot-swaps each view
+validate-complete-then-swap — the fresh generation must load before the old
+one retires, and a failed generation keeps serving the previous objects.
+When nothing
 changed, the currency fast-path no-ops in about a second. Tune per machine
 without reinstalling:
 
@@ -232,9 +242,17 @@ currency against the receipt, not command drift.
 Hooks refuse to overwrite hook files they did not write (use `--force`),
 and `codenib codegraph hook uninstall` removes only CodeNib-managed hooks.
 Pass `hook install --command` to override the recorded CodeNib executable
-(e.g. a venv binary instead of the PATH release).
-Indexes and MCP registrations are preserved. A dirty tree keeps views
-`stale` by design — commit first, then let the hook rebuild.
+(e.g. a venv binary instead of the PATH release); the runtime must support
+`--from-head` or installation fails loudly instead of failing silently on
+every commit.
+Indexes and MCP registrations are preserved.
+
+Hooks build the committed tree, not the working tree: each trigger indexes
+a disposable detached worktree at HEAD (`--from-head`), so dirty files and
+untracked paths can neither block nor pollute the rebuild. A dirty tree no
+longer keeps views `stale` — the graph tracks HEAD, and source reads
+re-verify once the worktree matches again. The same flag is available
+manually: `codenib index <repo> --preset auto --from-head`.
 
 ## Safe uninstall
 

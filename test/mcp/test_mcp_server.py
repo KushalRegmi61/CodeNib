@@ -209,6 +209,43 @@ def test_get_context_uninitialized():
         server_module.get_context()
 
 
+def test_get_context_reloads_stale_manifest_without_restart(tmp_path: Path):
+    """Any tool path via get_context picks up a hook-rebuilt manifest."""
+    from codenib.compiler.manifest import RepoManifest
+
+    manifest_path = tmp_path / "repo_manifest.json"
+    manifest = RepoManifest(
+        repo_path=str(tmp_path),
+        commit="b" * 40,
+        last_indexed_commit="b" * 40,
+        source_fingerprint=SOURCE_FINGERPRINT,
+        last_indexed_source_fingerprint=SOURCE_FINGERPRINT,
+        last_indexed_source_selection_digest=SOURCE_SELECTION_DIGEST,
+        languages=["python"],
+    )
+    manifest.save(manifest_path)
+
+    previous = server_module._ctx
+    server_module._ctx = ServerContext.load(manifest_path, views=[])
+    try:
+        assert server_module.get_context().manifest.commit == "b" * 40
+
+        moved = RepoManifest(
+            repo_path=str(tmp_path),
+            commit="c" * 40,
+            last_indexed_commit="c" * 40,
+            source_fingerprint=SOURCE_FINGERPRINT,
+            last_indexed_source_fingerprint=SOURCE_FINGERPRINT,
+            last_indexed_source_selection_digest=SOURCE_SELECTION_DIGEST,
+            languages=["python"],
+        )
+        moved.save(manifest_path)
+
+        assert server_module.get_context().manifest.commit == "c" * 40
+    finally:
+        server_module._ctx = previous
+
+
 def test_semantic_search_tool_no_vector_index(mock_manifest: Path):
     """Test semantic_search tool returns error when vector index not loaded."""
     # Initialize server with mock that fails vector loading
