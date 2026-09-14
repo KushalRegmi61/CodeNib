@@ -89,14 +89,18 @@ def test_hook_install_handler_passes_explicit_command(
 
     captured: dict = {}
 
-    def fake_install(repo_path, *, mode, batch_size, codenib_argv, force, dry_run):
+    def fake_install(
+        repo_path, *, mode, batch_size, codenib_argv, preset, force, dry_run
+    ):
         captured["argv"] = codenib_argv
-        return SimpleNamespace(hooks=("post-commit",), mode=mode)
+        captured["preset"] = preset
+        return SimpleNamespace(hooks=("post-commit",), mode=mode, preset=preset)
 
     monkeypatch.setattr(hooks, "install_hooks", fake_install)
     args = SimpleNamespace(
         repo=str(tmp_path),
         mode=None,
+        preset=None,
         embedding_batch_size=None,
         server_command=sys.executable,
         force=False,
@@ -105,6 +109,7 @@ def test_hook_install_handler_passes_explicit_command(
 
     assert cli._run_codegraph_hook_install(args) == 0
     assert captured["argv"][0].startswith(sys.executable)
+    assert captured["preset"] == "graph"
 
 
 def test_render_hook_script_contains_marker_and_command() -> None:
@@ -424,7 +429,7 @@ def test_hook_current_batch_size_is_boundary_aware(tmp_path, monkeypatch) -> Non
     from codenib.codegraph_hooks import _hook_current
 
     repo = _isolated_repo(tmp_path, monkeypatch)
-    receipt = HookReceipt(repo.resolve(), "background", 2, HOOK_NAMES)
+    receipt = HookReceipt(repo.resolve(), "background", 2, HOOK_NAMES, preset="auto")
 
     current = render_hook_script(
         ("codenib", "index", str(repo), "--preset", "auto", "--from-head"),
@@ -595,6 +600,52 @@ def test_legacy_v1_receipt_loads_with_unknown_command(tmp_path, monkeypatch) -> 
 
     assert loaded is not None
     assert loaded.command is None
+    assert loaded.preset == "auto"
+
+
+def test_hook_default_preset_is_graph_inclusive(tmp_path, monkeypatch) -> None:
+    from codenib.codegraph_hooks import (
+        HOOK_DEFAULT_PRESET,
+        resolve_hook_preset,
+    )
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    assert HOOK_DEFAULT_PRESET == "graph"
+    assert resolve_hook_preset(None) == "graph"
+    assert resolve_hook_preset("full") == "full"
+    with pytest.raises(CodeGraphHookError):
+        resolve_hook_preset("quantum")
+
+    receipt = install_hooks(
+        repo,
+        mode="background",
+        batch_size=None,
+        codenib_argv=(sys.executable, "-m", "codenib"),
+    )
+    assert receipt.preset == "graph"
+    content = hook_file_path(repo, "post-commit").read_text(encoding="utf-8")
+    assert "--preset graph" in content
+    assert "--from-head" in content
+
+
+def test_hook_currency_detects_preset_drift(tmp_path, monkeypatch) -> None:
+    import dataclasses
+
+    from codenib.codegraph_hooks import _hook_current
+
+    repo = _isolated_repo(tmp_path, monkeypatch)
+    receipt = install_hooks(
+        repo,
+        mode="background",
+        batch_size=None,
+        codenib_argv=(sys.executable, "-m", "codenib"),
+        preset="graph",
+    )
+    content = hook_file_path(repo, "post-commit").read_text(encoding="utf-8")
+    assert _hook_current(content, receipt, "post-commit") is True
+
+    drifted = dataclasses.replace(receipt, preset="auto")
+    assert _hook_current(content, drifted, "post-commit") is False
 
 
 def test_hook_currency_detects_command_drift(tmp_path, monkeypatch) -> None:

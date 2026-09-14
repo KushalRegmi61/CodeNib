@@ -305,15 +305,19 @@ def test_run_hook_install_batch_size_env_fallback_threads(
     (repo / ".git").mkdir(parents=True)
     captured: dict = {}
 
-    def fake_install(repo_path, *, mode, batch_size, codenib_argv, force, dry_run):
+    def fake_install(
+        repo_path, *, mode, batch_size, codenib_argv, preset, force, dry_run
+    ):
         captured["batch_size"] = batch_size
-        return SimpleNamespace(hooks=("post-commit",), mode=mode)
+        captured["preset"] = preset
+        return SimpleNamespace(hooks=("post-commit",), mode=mode, preset=preset)
 
     monkeypatch.setattr(hooks, "install_hooks", fake_install)
     args = cli.build_parser().parse_args(["codegraph", "hook", "install", str(repo)])
 
     assert cli._run_codegraph_hook_install(args) == 0
     assert captured["batch_size"] == 5
+    assert captured["preset"] == "graph"
 
 
 def test_source_selection_flags_are_mutually_exclusive() -> None:

@@ -31,10 +31,16 @@ from .paths import repo_state_dir
 
 HOOK_NAMES = ("post-commit", "post-checkout", "post-merge", "post-rewrite")
 HOOK_MARKER = "# managed by codenib hook"
-HOOK_RECEIPT_SCHEMA = 2
+HOOK_RECEIPT_SCHEMA = 3
 HOOK_RECEIPT_DIRNAME = "codegraph"
 HOOK_RECEIPT_FILENAME = "hooks.json"
 HOOK_MODE_ENV = "CODENIB_HOOK_MODE"
+# Hook index presets mirror ``codenib index --preset`` choices. ``auto`` never
+# includes ``symbol_graph`` (it resolves to ``fast``/``semantic``), so hooks
+# default to ``graph`` (bm25 + symbol_graph) to keep the graph fresh without
+# requiring embedding dependencies. ``full`` additionally refreshes vector.
+HOOK_PRESETS = ("auto", "fast", "semantic", "graph", "full")
+HOOK_DEFAULT_PRESET = "graph"
 
 # ``__PINNED_PYTHON__`` is replaced at install time with the interpreter that
 # ran ``install_hooks`` so GUI git clients with a minimal PATH still work.
@@ -57,6 +63,7 @@ class HookReceipt:
     batch_size: int | None
     hooks: tuple[str, ...]
     command: tuple[str, ...] | None = None
+    preset: str = HOOK_DEFAULT_PRESET
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +72,7 @@ class HookReceipt:
             "mode": self.mode,
             "batch_size": self.batch_size,
             "command": list(self.command) if self.command is not None else None,
+            "preset": self.preset,
             "hooks": {name: {"state": _HOOK_INSTALLED_STATE} for name in self.hooks},
         }
 
@@ -94,6 +102,17 @@ def resolve_hook_mode(explicit: str | None) -> str:
         return "background"
     if value not in _HOOK_MODES:
         raise CodeGraphHookError(f"invalid CodeGraph hook mode: {raw!r}")
+    return value
+
+
+def resolve_hook_preset(explicit: str | None) -> str:
+    """Resolve the hook index preset, defaulting to graph-inclusive."""
+
+    if explicit is None:
+        return HOOK_DEFAULT_PRESET
+    value = explicit.strip()
+    if value not in HOOK_PRESETS:
+        raise CodeGraphHookError(f"invalid CodeGraph hook preset: {explicit!r}")
     return value
 
 
@@ -278,6 +297,7 @@ def install_hooks(
     mode: str,
     batch_size: int | None,
     codenib_argv: tuple[str, ...],
+    preset: str = HOOK_DEFAULT_PRESET,
     force: bool = False,
     dry_run: bool = False,
 ) -> HookReceipt:
@@ -289,6 +309,7 @@ def install_hooks(
     repository = Path(repo).expanduser().resolve()
     if mode not in _HOOK_MODES:
         raise CodeGraphHookError(f"invalid CodeGraph hook mode: {mode!r}")
+    preset = resolve_hook_preset(preset)
     _check_batch_size(batch_size)
     if not (repository / ".git").is_dir():
         raise CodeGraphHookError(
@@ -307,7 +328,7 @@ def install_hooks(
             "--from-head; pass --command pointing at a codenib "
             "that supports the flag (committed-tree hooks require it)"
         )
-    argv = (*command, "index", str(repository), "--preset", "auto", "--from-head")
+    argv = (*command, "index", str(repository), "--preset", preset, "--from-head")
     script = render_hook_script(argv, repository, batch_size).replace(
         _PINNED_PYTHON_PLACEHOLDER, _pinned_python()
     )
@@ -323,7 +344,7 @@ def install_hooks(
                     f"refusing to overwrite foreign git hook {path}; "
                     "pass force=True to replace it"
                 )
-    receipt = HookReceipt(repository, mode, batch_size, HOOK_NAMES, command)
+    receipt = HookReceipt(repository, mode, batch_size, HOOK_NAMES, command, preset)
     if dry_run:
         return receipt
     for name in HOOK_NAMES:
@@ -344,6 +365,9 @@ def _hook_current(content: str, receipt: HookReceipt | None, name: str) -> bool:
     if "--from-head" not in content:
         return False
     if receipt.command is not None and shlex.join(receipt.command) not in content:
+        return False
+    expected_preset = receipt.preset or "auto"
+    if re.search(rf"--preset\s+{re.escape(expected_preset)}(?!\S)", content) is None:
         return False
     if receipt.batch_size is None:
         return "--embedding-batch-size" not in content
@@ -464,12 +488,15 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
     schema_version = payload.get("schema_version")
     if type(schema_version) is not int or schema_version not in (
         1,
+        2,
         HOOK_RECEIPT_SCHEMA,
     ):
         raise CodeGraphHookError("unsupported CodeGraph hook receipt schema")
     expected_keys = {"schema_version", "repository", "mode", "batch_size", "hooks"}
-    if schema_version == HOOK_RECEIPT_SCHEMA:
+    if schema_version == 2:
         expected_keys = expected_keys | {"command"}
+    if schema_version == HOOK_RECEIPT_SCHEMA:
+        expected_keys = expected_keys | {"command", "preset"}
     root = _strict_keys(payload, expected_keys, field="root")
     recorded_repo = Path(_strict_string(root["repository"], field="repository"))
     if not recorded_repo.is_absolute() or recorded_repo != repository:
@@ -483,8 +510,14 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
     if batch_size is not None and (type(batch_size) is not int or batch_size <= 0):
         raise CodeGraphHookError("invalid CodeGraph hook receipt field: batch_size")
     command: tuple[str, ...] | None = None
-    if root["schema_version"] == HOOK_RECEIPT_SCHEMA:
+    if root["schema_version"] in (2, HOOK_RECEIPT_SCHEMA):
         command = _strict_command(root["command"])
+    preset = "auto"
+    if root["schema_version"] == HOOK_RECEIPT_SCHEMA:
+        raw_preset = root["preset"]
+        if type(raw_preset) is not str or raw_preset not in HOOK_PRESETS:
+            raise CodeGraphHookError("invalid CodeGraph hook receipt field: preset")
+        preset = raw_preset
     hooks_value = root["hooks"]
     if type(hooks_value) is not dict or set(hooks_value) != set(HOOK_NAMES):
         raise CodeGraphHookError("invalid CodeGraph hook receipt object: hooks")
@@ -501,6 +534,7 @@ def load_hook_receipt(repo: Path) -> HookReceipt | None:
         batch_size,
         tuple(name for name in HOOK_NAMES if name in hooks_value),
         command,
+        preset,
     )
 
 
@@ -534,8 +568,10 @@ def write_hook_receipt(receipt: HookReceipt) -> Path:
 
 
 __all__ = [
+    "HOOK_DEFAULT_PRESET",
     "HOOK_MARKER",
     "HOOK_NAMES",
+    "HOOK_PRESETS",
     "HOOK_RECEIPT_SCHEMA",
     "CodeGraphHookError",
     "HookInspection",
@@ -550,5 +586,6 @@ __all__ = [
     "remove_hooks",
     "render_hook_script",
     "resolve_hook_mode",
+    "resolve_hook_preset",
     "write_hook_receipt",
 ]

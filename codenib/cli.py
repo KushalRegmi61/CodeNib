@@ -2172,6 +2172,7 @@ def _codegraph_ensure_hooks(
         install_hooks,
         load_hook_receipt,
         resolve_hook_mode,
+        resolve_hook_preset,
     )
 
     if getattr(args, "no_hooks", False):
@@ -2190,6 +2191,7 @@ def _codegraph_ensure_hooks(
     try:
         mode = resolve_hook_mode(None)
         batch_size = _resolve_embedding_batch_size(args)
+        preset = resolve_hook_preset(None)
     except (CodeGraphHookError, CLIError) as exc:
         print(f"warning: CodeGraph hooks not installed: {exc}")
         return
@@ -2202,6 +2204,7 @@ def _codegraph_ensure_hooks(
         and receipt.mode == mode
         and receipt.batch_size == batch_size
         and receipt.command == tuple(hook_argv)
+        and receipt.preset == preset
         and all(item.current for item in inspect_hooks(repo_path, receipt))
     ):
         print("Hooks:      current (automatic updates enabled)")
@@ -2212,6 +2215,7 @@ def _codegraph_ensure_hooks(
             mode=mode,
             batch_size=batch_size,
             codenib_argv=tuple(hook_argv),
+            preset=preset,
         )
     except (CodeGraphHookError, OSError) as exc:
         print(
@@ -2221,8 +2225,8 @@ def _codegraph_ensure_hooks(
         )
         return
     print(
-        f"Hooks:      installed ({installed.mode}; automatic updates on "
-        "commit, merge, checkout, and rewrite)"
+        f"Hooks:      installed ({installed.mode}, preset {installed.preset}; "
+        "automatic updates on commit, merge, checkout, and rewrite)"
     )
 
 
@@ -3040,6 +3044,7 @@ def _run_codegraph_hook_install(args: argparse.Namespace) -> int:
         hook_file_path,
         install_hooks,
         resolve_hook_mode,
+        resolve_hook_preset,
     )
     from .codegraph_onboarding import (
         CodeGraphOnboardingError,
@@ -3055,6 +3060,7 @@ def _run_codegraph_hook_install(args: argparse.Namespace) -> int:
             mode=resolve_hook_mode(args.mode),
             batch_size=batch_size,
             codenib_argv=(command, *prefix),
+            preset=resolve_hook_preset(getattr(args, "preset", "graph")),
             force=args.force,
             dry_run=args.dry_run,
         )
@@ -3066,7 +3072,7 @@ def _run_codegraph_hook_install(args: argparse.Namespace) -> int:
         print("Dry run complete; no hook files or receipts changed.")
         return 0
     for name in receipt.hooks:
-        print(f"{name}: installed (mode {receipt.mode})")
+        print(f"{name}: installed (mode {receipt.mode}, preset {receipt.preset})")
     return 0
 
 
@@ -3110,6 +3116,7 @@ def _run_codegraph_hook_status(args: argparse.Namespace) -> int:
         print("Receipt:    no CodeNib-managed hook receipt was found")
     else:
         print(f"Receipt mode: {receipt.mode}")
+        print(f"Receipt preset: {receipt.preset}")
     for item in inspections:
         marker = "OK" if item.installed and item.current else "MISSING"
         print(f"  [{marker:<7}] {item.name}: {item.detail}")
@@ -3693,6 +3700,12 @@ def build_parser() -> argparse.ArgumentParser:
                 "--command",
                 dest="server_command",
                 help="CodeNib executable recorded into the hook command",
+            )
+            hook_parser.add_argument(
+                "--preset",
+                choices=("auto", "fast", "semantic", "graph", "full"),
+                default="graph",
+                help="index preset the hook refreshes (default: graph)",
             )
             hook_parser.add_argument(
                 "--embedding-batch-size",
