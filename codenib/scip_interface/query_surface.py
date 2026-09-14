@@ -16,7 +16,7 @@ import struct
 from collections.abc import Mapping
 from typing import Any
 
-from ..types import is_architecture_node
+from ..types import EDGE_TYPE_IMPORT, is_architecture_node
 
 QUERY_SURFACE_SCHEMA_VERSION = 1
 PROJECT_QUERY_SURFACE_SCHEMA_VERSION = 3
@@ -367,7 +367,7 @@ def project_query_surface_sha256(graph: object) -> str:
                 raise ValueError(
                     f"edge[{index}] has manifest evidence on a non-manifest edge"
                 )
-        elif edge_type != "reference" and (
+        elif edge_type not in ("reference", EDGE_TYPE_IMPORT) and (
             attrs.get("anchor_file") is not None or attrs.get("anchor_line") is not None
         ):
             raise ValueError(f"edge[{index}] has anchors on a non-reference edge")

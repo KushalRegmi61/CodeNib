@@ -19,6 +19,7 @@ from codenib.scip_interface.query_surface import (
 from codenib.types import (
     DEPENDENCY_EDGE_TYPES,
     EDGE_TYPE_CONTAIN,
+    EDGE_TYPE_IMPORT,
     EDGE_TYPE_MANIFEST_DEPENDENCY,
     GRAPH_LAYER_ARCHITECTURE,
     NODE_TYPE_DIRECTORY,
@@ -404,3 +405,18 @@ def test_manifest_evidence_load_accepts_unsorted_list(tmp_path):
     graph.save_graph(path)
     loaded = CodeGraph.load_graph(path)
     assert len(loaded.graph.es[0]["manifest_evidence"]) == 2
+
+
+def test_project_query_surface_accepts_anchored_import_edges():
+    graph = CodeGraph("repo")
+    graph.add_file_node("src/use.ts")
+    graph.add_file_node("src/types.ts")
+    graph._add_edge(
+        "src/use.ts",
+        "src/types.ts",
+        EDGE_TYPE_IMPORT,
+        anchor_file="src/use.ts",
+        anchor_line=0,
+    )
+    digest = project_query_surface_sha256(graph)
+    assert isinstance(digest, str) and digest
