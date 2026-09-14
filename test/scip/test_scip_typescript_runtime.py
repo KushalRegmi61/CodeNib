@@ -238,3 +238,41 @@ def test_static_module_parser_safely_reuses_mixed_language_grammars():
     assert len(js_fingerprint) == 1
     assert ts_fingerprint[0][0] == "import_statement"
     assert js_fingerprint[0][0] == "import_statement"
+
+
+def test_generate_index_removes_inferred_tsconfig_after_generation(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "repo"
+    project.mkdir()
+    indexer = SCIPTypeScriptIndexer(project, output_dir=tmp_path / "index")
+
+    def fake_generate(_self, **kwargs):
+        assert kwargs.get("infer_tsconfig") is True
+        # Simulate the scip-typescript binary materializing tsconfig.json.
+        (project / "tsconfig.json").write_text('{"inferred": true}\n')
+        return True
+
+    monkeypatch.setattr(SCIPIndexerBase, "generate_index", fake_generate)
+
+    assert indexer.generate_index() is True
+    assert not (project / "tsconfig.json").exists()
+
+
+def test_generate_index_restores_preexisting_tsconfig_after_generation(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "repo"
+    project.mkdir()
+    original = '{"compilerOptions": {}}\n'
+    (project / "tsconfig.json").write_text(original)
+    indexer = SCIPTypeScriptIndexer(project, output_dir=tmp_path / "index")
+
+    def fake_generate(_self, **kwargs):
+        (project / "tsconfig.json").write_text('{"overwritten": true}\n')
+        return True
+
+    monkeypatch.setattr(SCIPIndexerBase, "generate_index", fake_generate)
+
+    assert indexer.generate_index() is True
+    assert (project / "tsconfig.json").read_text() == original

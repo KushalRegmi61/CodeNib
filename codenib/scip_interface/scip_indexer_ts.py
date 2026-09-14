@@ -600,14 +600,47 @@ class SCIPTypeScriptIndexer(SCIPIndexerBase):
                 self.project_root,
             )
 
-        return super().generate_index(
-            project_name=project_name,
-            infer_tsconfig=infer_tsconfig,
-            yarn_workspaces=yarn_workspaces,
-            pnpm_workspaces=pnpm_workspaces,
-            npm_workspaces=npm_workspaces,
-            patched_tsconfig=patched_tsconfig,
-        )
+        tsconfig_path = self.project_root / "tsconfig.json"
+        try:
+            prior_tsconfig = tsconfig_path.read_bytes()
+        except OSError:
+            prior_tsconfig = None
+        try:
+            return super().generate_index(
+                project_name=project_name,
+                infer_tsconfig=infer_tsconfig,
+                yarn_workspaces=yarn_workspaces,
+                pnpm_workspaces=pnpm_workspaces,
+                npm_workspaces=npm_workspaces,
+                patched_tsconfig=patched_tsconfig,
+            )
+        finally:
+            self._cleanup_inferred_tsconfig(tsconfig_path, prior_tsconfig)
+
+    def _cleanup_inferred_tsconfig(
+        self, tsconfig_path: Path, prior: Optional[bytes]
+    ) -> None:
+        """Restore the project root after tsconfig inference.
+
+        scip-typescript materializes ``tsconfig.json`` when inferring a
+        config for projects that own none.  That write lands inside the
+        indexed tree, so a committed-tree (``--from-head``) build would
+        observe a different source fingerprint after generation than before
+        and discard its own fresh views.  Remove the inferred file, or
+        restore the prior bytes when one already existed.
+        """
+
+        try:
+            if prior is None:
+                tsconfig_path.unlink(missing_ok=True)
+            elif tsconfig_path.read_bytes() != prior:
+                tsconfig_path.write_bytes(prior)
+        except OSError as exc:
+            logger.warning(
+                "Could not restore tsconfig state at %s (%s); continuing",
+                tsconfig_path,
+                exc,
+            )
 
     def run_pipeline(
         self,
